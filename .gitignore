@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 虚拟环境
+.venv/
+venv/
+
+# PyCharm / IDE
+.idea/
+.vscode/
+
+# 数据库和上传（运行时生成，不传）
+*.db
+uploads/
+knowledge_store.json

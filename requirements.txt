@@ -1,0 +1,8 @@
+ollama
+numpy
+jieba
+httpx
+fastapi
+uvicorn
+python-multipart
+openai
