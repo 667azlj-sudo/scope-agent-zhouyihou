@@ -1,0 +1,13 @@
+# Docker 打包时忽略这些（不需要打进去的文件）
+.venv/
+.idea/
+__pycache__/
+*.db
+uploads/
+knowledge_store.json
+.git/
+.gitignore
+node_modules/
+frontend/
+frontend-pure/
+README.md

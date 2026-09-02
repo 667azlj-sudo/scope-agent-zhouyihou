@@ -4,7 +4,9 @@ app.py —— Web 后端（FastAPI）
 统一暴露业务 API
 """
 from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import db
@@ -18,6 +20,19 @@ from splitter import split_project, set_cloud_key, is_cloud
 from router import route
 
 app = FastAPI(title="Scope Agent 权责分化系统")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 挂载上传目录为静态文件（图片消息用）
+import os
+os.makedirs("uploads", exist_ok=True)
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # 启动时确保表存在 + 加载知识库
 db.init_db()
@@ -114,6 +129,9 @@ class ChatIn(BaseModel):
 class MessageIn(BaseModel):
     token: str
     content: str
+    msg_type: str = "text"
+    lat: float = None
+    lng: float = None
 
 
 @app.post("/api/chats")
@@ -123,14 +141,34 @@ def create_chat(body: ChatIn):
     return {"chat_id": cid}
 
 
+@app.get("/api/chats/user/{uid}")
+def user_chats(uid: int):
+    """当前用户的会话列表（含最新消息、未读）"""
+    return {"chats": chat.get_user_chats(uid)}
+
+
 @app.post("/api/chats/{cid}/messages")
 def post_message(cid: int, body: MessageIn):
-    """发消息（用 token 识别身份）"""
+    """发消息（支持 text / location，用 token 识别身份）"""
     user = auth.get_user_by_token(body.token)
     if not user:
         return {"ok": False, "msg": "未登录或 token 无效"}
-    chat.send_message(cid, user["id"], body.content)
+    chat.send_message(cid, user["id"], body.content, body.msg_type, body.lat, body.lng)
     return {"ok": True, "msg": "已发送"}
+
+
+class WithdrawIn(BaseModel):
+    token: str
+
+
+@app.post("/api/messages/{mid}/withdraw")
+def withdraw(mid: int, body: WithdrawIn):
+    """撤回消息（2分钟内、只能撤回自己的）"""
+    user = auth.get_user_by_token(body.token)
+    if not user:
+        return {"ok": False, "msg": "未登录或 token 无效"}
+    ok, msg = chat.withdraw_message(mid, user["id"])
+    return {"ok": ok, "msg": msg}
 
 
 @app.get("/api/chats/{cid}/messages")
@@ -287,6 +325,20 @@ async def send_file(fid: int, user_token: str = Form(...), file: UploadFile = Fi
         f.write(await file.read())
     file_id = chat.upload_file(0, file.filename, path, user["id"])
     return {"ok": True, "msg": "已传文件", "file_id": file_id}
+
+
+@app.post("/api/chats/{cid}/image")
+async def send_image(cid: int, token: str = Form(...), file: UploadFile = File(...)):
+    """发送图片消息"""
+    user = auth.get_user_by_token(token)
+    if not user:
+        return {"ok": False, "msg": "未登录或 token 无效"}
+    os.makedirs("uploads", exist_ok=True)
+    path = os.path.join("uploads", file.filename)
+    with open(path, "wb") as f:
+        f.write(await file.read())
+    chat.send_message(cid, user["id"], f"/uploads/{file.filename}", "image")
+    return {"ok": True, "msg": "已发送图片"}
 
 
 if __name__ == "__main__":

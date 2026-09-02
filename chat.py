@@ -34,6 +34,10 @@ def init_chat_db():
         chat_id INTEGER NOT NULL,
         sender_id INTEGER NOT NULL,
         content TEXT NOT NULL,
+        type TEXT DEFAULT 'text',
+        lat REAL,
+        lng REAL,
+        status TEXT DEFAULT 'normal',
         created_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
     CREATE TABLE IF NOT EXISTS files (
@@ -51,6 +55,16 @@ def init_chat_db():
         status TEXT DEFAULT 'approved'
     );
     """)
+    # 兼容旧表：补 messages 新字段
+    mcols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
+    if "status" not in mcols:
+        conn.execute("ALTER TABLE messages ADD COLUMN status TEXT DEFAULT 'normal'")
+    if "type" not in mcols:
+        conn.execute("ALTER TABLE messages ADD COLUMN type TEXT DEFAULT 'text'")
+    if "lat" not in mcols:
+        conn.execute("ALTER TABLE messages ADD COLUMN lat REAL")
+    if "lng" not in mcols:
+        conn.execute("ALTER TABLE messages ADD COLUMN lng REAL")
     conn.commit()
     conn.close()
 
@@ -71,21 +85,45 @@ def create_chat(chat_type, name=None, member_ids=(1, 2)):
     return chat_id
 
 
-def send_message(chat_id, sender_id, content):
-    """发消息"""
+def send_message(chat_id, sender_id, content, msg_type="text", lat=None, lng=None):
+    """发消息（支持 text / location）"""
     conn = get_conn()
     conn.execute(
-        "INSERT INTO messages (chat_id, sender_id, content) VALUES (?,?,?)",
-        (chat_id, sender_id, content))
+        "INSERT INTO messages (chat_id, sender_id, content, type, lat, lng) VALUES (?,?,?,?,?,?)",
+        (chat_id, sender_id, content, msg_type, lat, lng))
     conn.commit()
     conn.close()
 
 
+def withdraw_message(mid, user_id):
+    """撤回消息（2分钟内、只能撤回自己的）"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM messages WHERE id=?", (mid,)).fetchone()
+    if not row:
+        conn.close()
+        return False, "消息不存在"
+    if row["sender_id"] != user_id:
+        conn.close()
+        return False, "只能撤回自己的消息"
+    mins = conn.execute(
+        "SELECT (julianday('now','localtime') - julianday(?)) * 24 * 60 AS m",
+        (row["created_at"],)).fetchone()["m"]
+    if mins > 120:
+        conn.close()
+        return False, "超过2分钟，不能撤回"
+    conn.execute("UPDATE messages SET status='withdrawn' WHERE id=?", (mid,))
+    conn.commit()
+    conn.close()
+    return True, "已撤回"
+
+
 def get_messages(chat_id):
-    """获取会话的所有消息（按时间顺序）"""
+    """获取会话的所有消息（含发送者名字）"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM messages WHERE chat_id=? ORDER BY id", (chat_id,)).fetchall()
+        "SELECT m.*, u.name AS sender_name FROM messages m "
+        "JOIN users u ON m.sender_id=u.id WHERE m.chat_id=? ORDER BY m.id",
+        (chat_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -157,5 +195,19 @@ def get_friends(user_id):
         "ON u.id = CASE WHEN f.user_id=? THEN f.friend_id ELSE f.user_id END "
         "WHERE (f.user_id=? OR f.friend_id=?) AND f.status='approved'",
         (user_id, user_id, user_id)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_user_chats(user_id):
+    """当前用户的会话列表（含最新消息、未读计数）"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT c.id, c.type, c.name, "
+        "(SELECT content FROM messages m WHERE m.chat_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_msg, "
+        "(SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id AND m.status='normal') AS unread "
+        "FROM chats c JOIN chat_members cm ON c.id=cm.chat_id "
+        "WHERE cm.user_id=? ORDER BY c.id DESC",
+        (user_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
