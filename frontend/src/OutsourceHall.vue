@@ -2,7 +2,7 @@
   <div class="outsource-hall">
     <div class="head">
       <h2>外包大厅</h2>
-      <p class="sub">其他公司发布的外包任务，接取后由你的 Agent 报价、审核、完成。</p>
+      <p class="sub">外包任务发布到这里，任何人都可以接取；接取后由你的 Agent 报价、审核、完成。</p>
     </div>
 
     <div v-for="t in tasks" :key="t.id" class="task-card">
@@ -17,8 +17,7 @@
         <span>· 难度 {{ difficultyLabel(t.difficulty) }}</span>
       </div>
       <div class="task-actions">
-        <el-button v-if="t.task_company_id !== user.company_id" type="primary" size="small" @click="accept(t)">接取</el-button>
-        <el-tag v-else type="info" size="small">本公司任务</el-tag>
+        <el-button type="primary" size="small" @click="accept(t)">接取</el-button>
       </div>
     </div>
     <p v-if="!tasks.length" class="empty">暂无外包任务</p>
