@@ -1,5 +1,5 @@
-// src/api.js —— 后端 API 封装
-const BASE = "http://127.0.0.1:8000"
+// src/api.js —— 后端 API 封装（走相对路径，由 Vite 代理转发到后端）
+const BASE = ""
 
 async function api(path, method = "GET", body = null, token = null) {
   const headers = { "Content-Type": "application/json" }
@@ -31,7 +31,7 @@ export function sendImage(cid, token, file) {
   const fd = new FormData()
   fd.append("token", token)
   fd.append("file", file)
-  return fetch(`http://127.0.0.1:8000/api/chats/${cid}/image`, { method: "POST", body: fd }).then(r => r.json())
+  return fetch(`/api/chats/${cid}/image`, { method: "POST", body: fd }).then(r => r.json())
 }
 export const confirmTask = (tid, user) => api(`/api/tasks/${tid}/confirm`, "POST", { user })
 export const proposeTask = (tid, user, newContent) => api(`/api/tasks/${tid}/propose`, "POST", { user, new_content: newContent })
@@ -57,7 +57,7 @@ export const markChatRead = (cid, token) => api(`/api/chats/${cid}/read`, "POST"
 export function uploadSubmissionImage(file) {
   const fd = new FormData()
   fd.append("file", file)
-  return fetch(`http://127.0.0.1:8000/api/submissions/image`, { method: "POST", body: fd }).then(r => r.json())
+  return fetch(`/api/submissions/image`, { method: "POST", body: fd }).then(r => r.json())
 }
 export const reviewSubmission = (sid, approve, exempt) => api(`/api/submissions/${sid}/review`, "POST", { approve, exempt })
 export const setSalary = (uid, baseSalary, exempt) => api(`/api/salary/${uid}/set`, "POST", { base_salary: baseSalary, exempt })

@@ -436,12 +436,15 @@ async def send_image(cid: int, token: str = Form(...), file: UploadFile = File(.
     user = auth.get_user_by_token(token)
     if not user:
         return {"ok": False, "msg": "未登录或 token 无效"}
+    import uuid
     os.makedirs("uploads", exist_ok=True)
-    path = os.path.join("uploads", file.filename)
+    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+    filename = f"chat_{uuid.uuid4().hex[:12]}{ext}"
+    path = os.path.join("uploads", filename)
     with open(path, "wb") as f:
         f.write(await file.read())
-    chat.send_message(cid, user["id"], f"/uploads/{file.filename}", "image")
-    return {"ok": True, "msg": "已发送图片"}
+    chat.send_message(cid, user["id"], f"/uploads/{filename}", "image")
+    return {"ok": True, "msg": "已发送图片", "url": f"/uploads/{filename}"}
 
 
 # ---- 多 Agent 协作（agent_framework）----
