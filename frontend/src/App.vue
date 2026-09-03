@@ -24,7 +24,6 @@
       <!-- 员工 / 普通成员 -->
       <MyTasks v-else-if="tab === 'mytask'" :user="user" />
       <MySpace v-else-if="tab === 'mine'" :user="user" />
-      <Project v-else-if="tab === 'project'" :user="user" />
 
       <!-- 外包大厅 -->
       <OutsourceHall v-else-if="tab === 'outsource'" :user="user" />
@@ -61,7 +60,6 @@ import Login from "./Login.vue"
 import Chat from "./Chat.vue"
 import ChatList from "./ChatList.vue"
 import Friends from "./Friends.vue"
-import Project from "./Project.vue"
 import AgentManage from "./AgentManage.vue"
 import TaskCenter from "./TaskCenter.vue"
 import ReviewSalary from "./ReviewSalary.vue"
@@ -93,9 +91,9 @@ function navFor(role) {
   // 普通成员
   return [
     { key: "outsource", icon: "🌐", label: "外包" },
+    { key: "mytask", icon: "📋", label: "任务" },
     { key: "chat", icon: "💬", label: "消息" },
     { key: "friends", icon: "👥", label: "好友" },
-    { key: "project", icon: "📋", label: "项目" },
     { key: "mine", icon: "👤", label: "我的" },
   ]
 }

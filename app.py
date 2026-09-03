@@ -310,10 +310,12 @@ def register(body: RegisterIn):
         if cc:
             chat.add_chat_member(cc["id"], user["id"])
 
-    # 自动为经理/员工建专属 Agent（不替员工干活，只做审核/报价/协作）
-    if user and body.role in ("manager", "employee"):
+    # 自动为所有人建专属 Agent（不替用户干活，只做审核/报价/协作）。
+    # 普通成员(user)也建 Agent，映射为 employee 角色，便于接外包单子。
+    if user:
         try:
-            af.create_agent(user["id"], body.role, f"{body.name} 的 Agent")
+            agent_role = body.role if body.role != "user" else "employee"
+            af.create_agent(user["id"], agent_role, f"{body.name} 的 Agent")
         except Exception:  # noqa: BLE001
             pass
     return {"ok": True, "msg": "注册成功"}
