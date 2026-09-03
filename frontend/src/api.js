@@ -75,6 +75,14 @@ export function uploadWorkRecordFile(uid, file) {
   return fetch(`/api/records/work/${uid}/upload`, { method: "POST", body: fd }).then(r => r.json())
 }
 
+// 个人能力知识库（读取电脑 → RAG）
+export const getAbilityStats = (uid) => api(`/api/knowledge/${uid}/stats`)
+export function uploadAbilityFiles(uid, files) {
+  const fd = new FormData()
+  for (const f of files) fd.append("files", f)
+  return fetch(`/api/knowledge/${uid}/upload`, { method: "POST", body: fd }).then(r => r.json())
+}
+
 // 知识库② 任务条件
 export const getTaskConditions = (companyId) => api(`/api/conditions/${companyId}`)
 export const addTaskCondition = (companyId, keywords, conditions) => api("/api/conditions", "POST", { company_id: companyId, keywords, conditions })

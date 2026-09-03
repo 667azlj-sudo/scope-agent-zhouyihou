@@ -47,7 +47,9 @@
           <el-input v-model="inviteCode" placeholder="公司邀请码" />
         </el-form-item>
         <el-form-item v-if="role">
-          <el-input v-model="position" placeholder="公司岗位，如：后端工程师" />
+          <el-select v-model="position" style="width: 100%" placeholder="选择工种" filterable allow-create>
+            <el-option v-for="p in positions" :key="p" :label="p" :value="p" />
+          </el-select>
         </el-form-item>
       </template>
 
@@ -75,6 +77,7 @@ const phone = ref(""), code = ref(""), role = ref("")
 const companyName = ref(""), inviteCode = ref(""), position = ref("")
 const loading = ref(false), countdown = ref(0)
 let timer = null
+const positions = ["ToB销售", "程序员", "产品经理", "UI设计师", "运营", "市场", "客服", "财务", "人事", "测试工程师", "数据分析师", "后端开发", "前端开发", "其他"]
 
 function toggleMode() {
   isRegister.value = !isRegister.value

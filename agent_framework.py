@@ -178,6 +178,43 @@ def get_agent_by_user(user_id):
     return dict(row) if row else None
 
 
+def rename_agent_by_ability(agent_id):
+    """读取该员工的能力知识库，用 LLM 判断真实工种，重新命名 Agent（如「张三 · 后端开发」）。"""
+    agent = get_agent(agent_id)
+    if not agent:
+        return {"ok": False, "msg": "Agent 不存在"}
+    try:
+        import ability_kb
+        records = ability_kb.load_records(agent["user_id"])
+    except Exception:  # noqa: BLE001
+        records = []
+    if not records:
+        return {"ok": False, "msg": "能力知识库为空，无法命名"}
+
+    sample = "\n".join(t[:300] for t, _ in records[:10])
+    specialty = "员工"
+    try:
+        from llm import chat as llm_chat
+        system = ("你是岗位识别助手。根据员工的能力知识库内容，判断员工最擅长/真实从事的工种，"
+                  "返回一个简短的工种名（如：后端开发、ToB销售、UI设计师），只返回工种名，不要多余文字。")
+        resp = llm_chat([{"role": "system", "content": system},
+                         {"role": "user", "content": sample}])
+        name = (getattr(resp, "content", None) or "").strip()
+        if name:
+            specialty = name[:20]
+    except Exception as e:  # noqa: BLE001
+        print(f"[rename] LLM 命名失败：{e}")
+
+    conn = get_conn()
+    urow = conn.execute("SELECT name FROM users WHERE id=?", (agent["user_id"],)).fetchone()
+    user_name = dict(urow)["name"] if urow else "员工"
+    new_name = f"{user_name} · {specialty}"
+    conn.execute("UPDATE agents SET name=? WHERE id=?", (new_name, agent_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "name": new_name, "specialty": specialty}
+
+
 def create_agent(user_id, role_type, name, config=None):
     """为一个员工建立 Agent（user_id 唯一）。
 
@@ -792,10 +829,18 @@ def estimate_task(agent_id, task_id):
     task = dict(task)
     agent = dict(agent)
 
-    # 知识库①：本地记录 + 工作记录 → 适配度 & 报价
+    # 知识库①：本地记录 + 工作记录 + 能力知识库(RAG) → 适配度 & 报价
     profile = get_user_records(agent["user_id"])["content"]
     works = "；".join(r["content"] for r in get_work_records(agent["user_id"]))
-    context = f"本地记录：{profile or '无'}\n工作记录：{works or '无'}"
+    kb_text = "无"
+    try:
+        import ability_kb
+        kb_hits = ability_kb.search(agent["user_id"], f"{task['title']} {task.get('detail') or ''}", top_k=3)
+        if kb_hits:
+            kb_text = "\n".join(f"- {t}" for t, _ in kb_hits)
+    except Exception as e:  # noqa: BLE001
+        print(f"[estimate] 能力知识库检索失败：{e}")
+    context = f"本地记录：{profile or '无'}\n工作记录：{works or '无'}\n能力知识库：{kb_text}"
     salary = get_salary(agent["user_id"])
     base = float(salary["base_salary"] or 6000)
     est = _estimate_with_llm(task, context, base)

@@ -15,6 +15,7 @@ import chat
 import company
 import graphrag
 import knowledge
+import ability_kb
 import llm
 import memory
 import sms
@@ -686,6 +687,37 @@ def import_work_records_from_chats(uid: int):
     for m in msgs:
         af.add_work_record(uid, f"[聊天记录] {m['content']}")
     return {"ok": True, "count": len(msgs)}
+
+
+# ---- 个人能力知识库（让 Agent 读取电脑 → RAG）----
+@app.post("/api/knowledge/{uid}/upload")
+async def upload_ability_files(uid: int, files: list[UploadFile] = File(...)):
+    """员工选择本地文件夹/文档上传，RAG 进个人能力知识库。"""
+    texts = []
+    for f in files:
+        data = await f.read()
+        text = _read_text_bytes(data).strip()
+        if text:
+            texts.append(text[:3000])
+    if not texts:
+        return {"ok": False, "msg": "没有可解析的文本内容"}
+    n = ability_kb.add(uid, texts)
+    # 读取文档后，用 LLM 判断真实工种，重新命名 agent
+    rename_info = None
+    agent = af.get_agent_by_user(uid)
+    if agent:
+        rename_info = af.rename_agent_by_ability(agent["id"])
+    return {"ok": True, "count": n, "added": len(texts), "rename": rename_info}
+
+
+@app.get("/api/knowledge/{uid}/stats")
+def ability_kb_stats(uid: int):
+    return {"count": ability_kb.stats(uid)}
+
+
+@app.get("/api/knowledge/{uid}/search")
+def ability_kb_search(uid: int, q: str = ""):
+    return {"hits": ability_kb.search(uid, q, top_k=3)}
 
 
 # ---- 知识库②：任务条件 ----

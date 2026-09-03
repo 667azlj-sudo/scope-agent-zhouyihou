@@ -44,7 +44,7 @@
           <el-button class="records-save" type="primary" size="small" :loading="savingRecords" @click="saveMyRecords">保存</el-button>
         </el-collapse-item>
         <el-collapse-item title="工作记录（Agent 判断任务是否适合你）" name="work">
-          <p class="records-hint">记录来源：手动添加 / 上传文档 / 导入聊天记录。</p>
+          <p class="records-hint">记录来源：手动添加 / 上传文档 / 导入聊天记录 / 让 Agent 读取电脑。</p>
           <div class="work-add">
             <el-input v-model="newWorkRecord" type="textarea" :rows="2" placeholder="例如：本周完成订单系统重构，熟练使用 Python 与 Redis" />
             <el-button type="primary" size="small" @click="addMyWorkRecord">添加</el-button>
@@ -52,6 +52,10 @@
           <div class="work-source">
             <el-button size="small" @click="pickWorkFile">📄 上传文档</el-button>
             <el-button size="small" @click="importChatRecords">💬 导入聊天记录</el-button>
+          </div>
+          <div class="work-source">
+            <el-button size="small" type="primary" plain @click="pickAbilityFiles">🖥 让 Agent 读取电脑</el-button>
+            <span v-if="abilityCount" class="kb-count">能力知识库已索引 {{ abilityCount }} 段</span>
           </div>
           <div v-for="w in workRecords" :key="w.id" class="work-item">
             <span class="work-text">{{ w.content }}</span>
@@ -119,12 +123,13 @@
 
     <input ref="imgInput" type="file" accept="image/*" multiple hidden @change="onPickImage" />
     <input ref="workFileInput" type="file" hidden @change="onWorkFile" />
+    <input ref="abilityFileInput" type="file" webkitdirectory multiple hidden @change="onAbilityFiles" />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask, uploadWorkRecordFile, importWorkRecordsFromChats } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask, uploadWorkRecordFile, importWorkRecordsFromChats, uploadAbilityFiles, getAbilityStats } from "./api.js"
 import { statusLabel, difficultyLabel, money } from "./format.js"
 import { ElMessage } from "element-plus"
 
@@ -134,7 +139,8 @@ const hallTasks = ref([])
 const drafts = reactive({}), estimating = reactive({}), images = reactive({})
 const records = ref(""), recordsOpen = ref([]), savingRecords = ref(false)
 const workRecords = ref([]), newWorkRecord = ref("")
-const imgInput = ref(null), currentUploadTaskId = ref(null), workFileInput = ref(null)
+const imgInput = ref(null), currentUploadTaskId = ref(null), workFileInput = ref(null), abilityFileInput = ref(null)
+const abilityCount = ref(0)
 
 const totalEarned = computed(() =>
   tasks.value
@@ -152,6 +158,7 @@ async function load() {
   salary.value = s
   records.value = rec.content || ""
   await loadWorkRecords()
+  await loadAbilityStats()
 }
 
 async function loadHall() {
@@ -211,6 +218,31 @@ async function importChatRecords() {
   } catch (e) {
     ElMessage.error("导入失败：" + (e.message || "请重试"))
   }
+}
+
+function pickAbilityFiles() {
+  if (abilityFileInput.value) abilityFileInput.value.click()
+}
+
+async function onAbilityFiles(e) {
+  const files = Array.from(e.target.files || [])
+  if (!files.length) { e.target.value = ""; return }
+  try {
+    const r = await uploadAbilityFiles(props.user.id, files)
+    if (r.ok) {
+      ElMessage.success(`已读取 ${r.added} 个文档并 RAG 进能力知识库`)
+      await loadAbilityStats()
+    } else {
+      ElMessage.error(r.msg || "读取失败")
+    }
+  } catch (err) {
+    ElMessage.error("读取失败：" + (err.message || "请重试"))
+  }
+  e.target.value = ""
+}
+
+async function loadAbilityStats() {
+  try { abilityCount.value = (await getAbilityStats(props.user.id)).count || 0 } catch (e) { /* 忽略 */ }
 }
 
 async function saveMyRecords() {
@@ -297,7 +329,8 @@ onMounted(load)
 .records-save { margin-top: 8px; }
 .work-add { display: flex; gap: 8px; align-items: flex-start; }
 .work-add .el-textarea { flex: 1; }
-.work-source { display: flex; gap: 8px; margin: 8px 0; }
+.work-source { display: flex; gap: 8px; margin: 8px 0; align-items: center; }
+.kb-count { font-size: 12px; color: var(--muted); }
 .work-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .work-item:last-child { border-bottom: none; }
 .work-text { flex: 1; color: #4b5158; }
