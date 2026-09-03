@@ -639,6 +639,37 @@ def delete_work_record(rid: int):
     return af.delete_work_record(rid)
 
 
+def _read_text_bytes(data: bytes) -> str:
+    """尽力把上传的文档字节解码成文本（UTF-8 → GBK → 兜底）。"""
+    for enc in ("utf-8", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+@app.post("/api/records/work/{uid}/upload")
+async def upload_work_record_file(uid: int, file: UploadFile = File(...)):
+    """上传文档，解析文本内容存入工作记录。"""
+    data = await file.read()
+    text = _read_text_bytes(data).strip()
+    if not text:
+        return {"ok": False, "msg": "无法解析该文档，请上传文本类文件（.txt/.md/.log/.csv 等）"}
+    return af.add_work_record(uid, f"[文档] {text[:2000]}")
+
+
+@app.post("/api/records/work/{uid}/from-chats")
+def import_work_records_from_chats(uid: int):
+    """把该用户最近发的聊天消息导入为工作记录。"""
+    msgs = chat.get_user_sent_messages(uid, limit=30)
+    if not msgs:
+        return {"ok": False, "msg": "没有可导入的聊天记录"}
+    for m in msgs:
+        af.add_work_record(uid, f"[聊天记录] {m['content']}")
+    return {"ok": True, "count": len(msgs)}
+
+
 # ---- 知识库②：任务条件 ----
 class TaskConditionIn(BaseModel):
     company_id: int | None = None

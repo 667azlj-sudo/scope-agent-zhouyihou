@@ -64,6 +64,12 @@ export const claimTask = (taskId, userId) => api(`/api/hall/${taskId}/claim`, "P
 export const getWorkRecords = (uid) => api(`/api/records/work/${uid}`)
 export const addWorkRecord = (uid, content) => api(`/api/records/work/${uid}`, "POST", { content })
 export const deleteWorkRecord = (rid) => api(`/api/records/work/${rid}`, "DELETE", {})
+export const importWorkRecordsFromChats = (uid) => api(`/api/records/work/${uid}/from-chats`, "POST", {})
+export function uploadWorkRecordFile(uid, file) {
+  const fd = new FormData()
+  fd.append("file", file)
+  return fetch(`/api/records/work/${uid}/upload`, { method: "POST", body: fd }).then(r => r.json())
+}
 
 // 知识库② 任务条件
 export const getTaskConditions = (companyId) => api(`/api/conditions/${companyId}`)

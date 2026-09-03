@@ -304,6 +304,17 @@ def get_messages(chat_id):
     return [dict(r) for r in rows]
 
 
+def get_user_sent_messages(user_id, limit=30):
+    """某用户最近发过的文字消息（聊天记录，可导入为工作记录）。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT content, created_at FROM messages "
+        "WHERE sender_id=? AND type='text' AND status='normal' "
+        "ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
 def upload_file(project_id, filename, filepath, uploaded_by):
     """负责人上传资料，返回文件 id"""
     conn = get_conn()

@@ -44,10 +44,14 @@
           <el-button class="records-save" type="primary" size="small" :loading="savingRecords" @click="saveMyRecords">保存</el-button>
         </el-collapse-item>
         <el-collapse-item title="工作记录（Agent 判断任务是否适合你）" name="work">
-          <p class="records-hint">导入你的工作记录，Agent 会据此判断任务适配度。</p>
+          <p class="records-hint">记录来源：手动添加 / 上传文档 / 导入聊天记录。</p>
           <div class="work-add">
             <el-input v-model="newWorkRecord" type="textarea" :rows="2" placeholder="例如：本周完成订单系统重构，熟练使用 Python 与 Redis" />
             <el-button type="primary" size="small" @click="addMyWorkRecord">添加</el-button>
+          </div>
+          <div class="work-source">
+            <el-button size="small" @click="pickWorkFile">📄 上传文档</el-button>
+            <el-button size="small" @click="importChatRecords">💬 导入聊天记录</el-button>
           </div>
           <div v-for="w in workRecords" :key="w.id" class="work-item">
             <span class="work-text">{{ w.content }}</span>
@@ -114,12 +118,13 @@
     </template>
 
     <input ref="imgInput" type="file" accept="image/*" multiple hidden @change="onPickImage" />
+    <input ref="workFileInput" type="file" hidden @change="onWorkFile" />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask, uploadWorkRecordFile, importWorkRecordsFromChats } from "./api.js"
 import { statusLabel, difficultyLabel, money } from "./format.js"
 import { ElMessage } from "element-plus"
 
@@ -129,7 +134,7 @@ const hallTasks = ref([])
 const drafts = reactive({}), estimating = reactive({}), images = reactive({})
 const records = ref(""), recordsOpen = ref([]), savingRecords = ref(false)
 const workRecords = ref([]), newWorkRecord = ref("")
-const imgInput = ref(null), currentUploadTaskId = ref(null)
+const imgInput = ref(null), currentUploadTaskId = ref(null), workFileInput = ref(null)
 
 const totalEarned = computed(() =>
   tasks.value
@@ -179,6 +184,33 @@ async function addMyWorkRecord() {
 async function removeWorkRecord(rid) {
   await deleteWorkRecord(rid)
   await loadWorkRecords()
+}
+
+function pickWorkFile() {
+  if (workFileInput.value) workFileInput.value.click()
+}
+
+async function onWorkFile(e) {
+  const f = e.target.files[0]
+  if (!f) { e.target.value = ""; return }
+  try {
+    const r = await uploadWorkRecordFile(props.user.id, f)
+    if (r.ok) { ElMessage.success("文档已导入工作记录"); await loadWorkRecords() }
+    else ElMessage.error(r.msg || "导入失败")
+  } catch (err) {
+    ElMessage.error("上传失败：" + (err.message || "请重试"))
+  }
+  e.target.value = ""
+}
+
+async function importChatRecords() {
+  try {
+    const r = await importWorkRecordsFromChats(props.user.id)
+    if (r.ok) { ElMessage.success(`已导入 ${r.count} 条聊天记录`); await loadWorkRecords() }
+    else ElMessage.error(r.msg || "导入失败")
+  } catch (e) {
+    ElMessage.error("导入失败：" + (e.message || "请重试"))
+  }
 }
 
 async function saveMyRecords() {
@@ -265,6 +297,7 @@ onMounted(load)
 .records-save { margin-top: 8px; }
 .work-add { display: flex; gap: 8px; align-items: flex-start; }
 .work-add .el-textarea { flex: 1; }
+.work-source { display: flex; gap: 8px; margin: 8px 0; }
 .work-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .work-item:last-child { border-bottom: none; }
 .work-text { flex: 1; color: #4b5158; }
