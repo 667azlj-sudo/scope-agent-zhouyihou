@@ -577,6 +577,16 @@ def list_agents():
     return {"agents": af.list_agents()}
 
 
+@app.get("/api/users")
+def list_users():
+    """所有用户（建群/拉人时选择成员用）"""
+    return {"users": [
+        {"id": u["id"], "name": u["name"], "role": u["role"],
+         "position": u.get("position"), "company_id": u.get("company_id")}
+        for u in auth.get_all_users()
+    ]}
+
+
 @app.get("/api/companies")
 def list_companies():
     """公司列表（注册时可选）"""

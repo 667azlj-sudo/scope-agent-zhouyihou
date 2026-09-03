@@ -59,17 +59,17 @@
 
 <script setup>
 import { ref, computed, onMounted } from "vue"
-import { getUserChats, createGroup, addChatMember, getCompany } from "./api.js"
+import { getUserChats, createGroup, addChatMember, getUsers } from "./api.js"
 import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
 const emit = defineEmits(["open"])
 const chats = ref([])
-const companyMembers = ref([])
+const allUsers = ref([])
 const dialogVisible = ref(false), newGroupName = ref(""), selectedMembers = ref([])
 const addMemberVisible = ref(false), addMemberChatId = ref(null), addMemberUserId = ref(null)
 
-const otherMembers = computed(() => companyMembers.value.filter(m => m.id !== props.user.id))
+const otherMembers = computed(() => allUsers.value.filter(m => m.id !== props.user.id))
 
 function typeLabel(t) { return t === "company" ? "总公司" : t === "group" ? "群聊" : "私聊" }
 function nameOf(c) { return c.type === "company" ? "总公司群" : (c.name || "私聊") }
@@ -77,12 +77,7 @@ function avatarOf(c) { return (nameOf(c) || "?")[0] }
 
 onMounted(async () => {
   await loadChats()
-  if (props.user.company_id) {
-    try {
-      const r = await getCompany(props.user.company_id)
-      if (r.ok) companyMembers.value = r.members || []
-    } catch (e) { /* 忽略 */ }
-  }
+  try { allUsers.value = (await getUsers()).users || [] } catch (e) { /* 忽略 */ }
 })
 
 async function loadChats() {

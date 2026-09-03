@@ -52,6 +52,7 @@ export const reviewEstimate = (taskId, approve) => api(`/api/tasks/${taskId}/rev
 export const getRecords = (uid) => api(`/api/records/${uid}`)
 export const saveRecords = (uid, content) => api(`/api/records/${uid}`, "POST", { content })
 export const getCompany = (cid) => api(`/api/companies/${cid}`)
+export const getUsers = () => api("/api/users")
 
 // 任务大厅
 export const unmatchedTasks = () => api("/api/tasks/unmatched")
