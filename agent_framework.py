@@ -297,7 +297,8 @@ def split_task(title, detail, manager_agent_id=None):
         "每个子任务包含字段 title(标题)、detail(具体要求)、assignee_role(负责角色，"
         "只能是 employee/functional/manager)、classification(分级，取值只能是"
         "「机密」或「一般」：涉及公司核心秘密、敏感数据或不可外泄的内容判定为「机密」，"
-        "否则普通可外包的内容判定为「一般」)。只返回 JSON 数组，不要输出多余文字。"
+        "否则判定为「一般」)、difficulty(难度，0~1 的小数，简单任务接近 0，困难任务接近 1)。"
+        "只返回 JSON 数组，不要输出多余文字。"
     )
     user = f"任务标题：{title}\n任务详情：{detail}"
     resp = llm_chat([{"role": "system", "content": system},
@@ -318,10 +319,14 @@ def split_task(title, detail, manager_agent_id=None):
             classification = item.get("classification", "一般")
             if classification not in ("机密", "一般"):
                 classification = "一般"
+            try:
+                difficulty = max(0.0, min(1.0, float(item.get("difficulty", 0.5))))
+            except (TypeError, ValueError):
+                difficulty = 0.5
             cur = conn.execute(
-                "INSERT INTO agent_tasks (title, detail, assignee_role, status, "
-                "manager_agent, classification) VALUES (?,?,?,?,?,?)",
-                (sub_title, sub_detail, assignee_role, "pending_classify",
+                "INSERT INTO agent_tasks (title, detail, difficulty, assignee_role, status, "
+                "manager_agent, classification) VALUES (?,?,?,?,?,?,?)",
+                (sub_title, sub_detail, difficulty, assignee_role, "pending_classify",
                  manager_agent_id, classification),
             )
             created.append({
@@ -330,6 +335,7 @@ def split_task(title, detail, manager_agent_id=None):
                 "detail": sub_detail,
                 "assignee_role": assignee_role,
                 "classification": classification,
+                "difficulty": difficulty,
                 "status": "pending_classify",
                 "manager_agent": manager_agent_id,
             })
@@ -339,14 +345,33 @@ def split_task(title, detail, manager_agent_id=None):
         conn.close()
 
 
+def _outsource_suggestion(classification, difficulty):
+    """外包要求：不涉密 + 极简单。返回 (建议, 理由)。"""
+    try:
+        d = float(difficulty)
+    except (TypeError, ValueError):
+        d = 0.5
+    if classification == "机密":
+        return "内部", "涉及公司机密，建议内部处理"
+    if d < 0.34:
+        return "外包", "不涉密且简单，可外包"
+    return "内部", "不涉密但不算简单，建议内部处理"
+
+
 def get_pending_classification():
-    """查所有待经理确认分级（status=pending_classify）的子任务，含分类信息。"""
+    """查所有待经理确认分级（status=pending_classify）的子任务，含分类与外包建议。"""
     conn = get_conn()
     rows = conn.execute(
         "SELECT * FROM agent_tasks WHERE status='pending_classify' ORDER BY id DESC"
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["suggestion"], d["suggestion_reason"] = _outsource_suggestion(
+            d.get("classification"), d.get("difficulty"))
+        out.append(d)
+    return out
 
 
 def manager_choose(task_id, choice):

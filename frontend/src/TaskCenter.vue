@@ -10,11 +10,15 @@
 
     <el-card shadow="never" class="card">
       <h3>待分级</h3>
-      <p class="hint">自动拆解出的子任务，请决定内部处理还是外包。</p>
-      <div v-for="t in pendings" :key="t.id" class="item">
-        <div class="item-main">
-          <span class="title">{{ t.title }}</span>
-          <el-tag :type="t.classification === '机密' ? 'danger' : 'info'">{{ t.classification }}</el-tag>
+      <p class="hint">自动拆解出的子任务，请决定内部处理还是外包（外包要求：不涉密且极简单）。</p>
+      <div v-for="t in pendings" :key="t.id" class="item classify">
+        <div class="classify-main">
+          <div class="item-main">
+            <span class="title">{{ t.title }}</span>
+            <el-tag :type="t.classification === '机密' ? 'danger' : 'info'">{{ t.classification }}</el-tag>
+            <el-tag :type="t.suggestion === '外包' ? 'warning' : 'success'" effect="plain">建议{{ t.suggestion }}</el-tag>
+          </div>
+          <p class="suggest-reason">{{ t.suggestion_reason }}</p>
         </div>
         <div class="item-actions">
           <el-button size="small" type="danger" plain @click="choose(t.id, 'internal')">内部处理</el-button>
@@ -174,6 +178,9 @@ onMounted(loadAll)
 .mb { margin-bottom: 10px; }
 .item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .item:last-child { border-bottom: none; }
+.classify { align-items: flex-start; }
+.classify-main { flex: 1; min-width: 0; }
+.suggest-reason { margin: 4px 0 0; font-size: 12px; color: var(--muted); }
 .item-main { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
 .item .title { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-actions { display: flex; gap: 6px; flex-shrink: 0; }
