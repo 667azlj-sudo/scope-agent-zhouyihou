@@ -542,8 +542,19 @@ def estimate_task(body: EstimateTaskIn):
 
 @app.post("/api/tasks/{tid}/review-estimate")
 def review_estimate(tid: int, body: ReviewEstimateIn):
-    """经理 agent 审核报价：通过→正式派发(可改价) / 打回→重新报价"""
+    """经理 agent 审核报价：通过→正式派发(改价则待员工确认) / 打回→重新报价"""
     return af.review_estimate(tid, body.approve, body.custom_wage)
+
+
+class ConfirmPriceIn(BaseModel):
+    user_id: int
+    agree: bool
+
+
+@app.post("/api/tasks/{tid}/confirm-price")
+def confirm_price(tid: int, body: ConfirmPriceIn):
+    """员工确认经理改价：同意→派发 / 不同意→返回经理重新定价"""
+    return af.employee_confirm_price(tid, body.user_id, body.agree)
 
 
 @app.get("/api/tasks/internal")

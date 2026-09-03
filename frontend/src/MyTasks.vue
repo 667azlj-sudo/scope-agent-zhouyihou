@@ -94,6 +94,15 @@
           <div v-if="t.needs_conditions" class="suit need">条件库暂无此任务条件，已通知负责人补充</div>
         </div>
 
+        <!-- 经理改价，待员工确认 -->
+        <div v-else-if="t.status === 'price_confirm'" class="feedback warn">
+          <div>经理定价 {{ money(t.agreed_wage) }}（你的报价 ¥{{ t.estimated_wage }}），是否同意？</div>
+          <div class="price-confirm-btns">
+            <el-button size="small" type="success" @click="doConfirmPrice(t, true)">同意</el-button>
+            <el-button size="small" type="danger" plain @click="doConfirmPrice(t, false)">不同意，返回重谈</el-button>
+          </div>
+        </div>
+
         <!-- 进行中 / 已打回：提交成果 -->
         <template v-else-if="t.status === 'assigned' || t.status === 'rejected'">
           <div v-if="t.status === 'rejected'" class="feedback bad">负责人已打回，请修改后重新提交</div>
@@ -133,7 +142,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask, uploadWorkRecordFile, importWorkRecordsFromChats, uploadAbilityFiles, getAbilityStats, uploadTaskFile } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask, uploadWorkRecordFile, importWorkRecordsFromChats, uploadAbilityFiles, getAbilityStats, uploadTaskFile, confirmPrice } from "./api.js"
 import { statusLabel, difficultyLabel, money } from "./format.js"
 import { ElMessage } from "element-plus"
 
@@ -295,6 +304,16 @@ async function doEstimate(t) {
   }
 }
 
+async function doConfirmPrice(t, agree) {
+  try {
+    const r = await confirmPrice(t.id, props.user.id, agree)
+    ElMessage.success(r.msg || (agree ? "已同意" : "已返回"))
+    await load()
+  } catch (e) {
+    ElMessage.error("操作失败：" + (e.message || "请稍后重试"))
+  }
+}
+
 async function submit(t) {
   const content = (drafts[t.id] || "").trim()
   if (!content) { ElMessage.warning("请先填写成果内容"); return }
@@ -397,5 +416,6 @@ onMounted(load)
 .feedback.ok { background: #e9f7ef; color: #2e9e5b; }
 .feedback.bad { background: #fdecec; color: #d6336c; }
 .feedback.warn { background: #fff6e6; color: #b7791f; }
+.price-confirm-btns { display: flex; gap: 8px; margin-top: 8px; }
 .empty-list { text-align: center; color: var(--muted); padding: 24px 0; }
 </style>

@@ -8,6 +8,7 @@ export const taskStatus = {
   hall: "任务大厅待接取",
   distributed: "待报价",
   estimated: "待审核报价",
+  price_confirm: "待确认价格",
   assigned: "进行中",
   submitted: "已提交",
   approved: "已通过",

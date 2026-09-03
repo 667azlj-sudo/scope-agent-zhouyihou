@@ -937,20 +937,55 @@ def review_estimate(task_id, approve, custom_wage=None):
         return {"ok": False, "msg": "任务当前不在待审核报价状态"}
     if approve:
         wage = float(task.get("estimated_wage") or 0)
+        changed = False
         if custom_wage is not None and float(custom_wage) > 0:
             wage = round(float(custom_wage), 2)
+            changed = True
             record_pricing_decision(_task_manager_user_id(task), task["title"],
                                     task.get("difficulty") or 0.5,
                                     task.get("estimated_wage"), wage)
-        conn.execute("UPDATE agent_tasks SET status='assigned', agreed_wage=? WHERE id=?",
-                     (wage, task_id))
-        msg = f"报价已通过，任务正式派发，工资 {wage}"
+        if changed:
+            # 经理改价 → 返还员工确认，协商一致才派发
+            conn.execute("UPDATE agent_tasks SET agreed_wage=?, status='price_confirm' WHERE id=?",
+                         (wage, task_id))
+            msg = f"已按 {wage} 定价，等待员工确认"
+        else:
+            conn.execute("UPDATE agent_tasks SET status='assigned', agreed_wage=? WHERE id=?",
+                         (wage, task_id))
+            msg = f"报价已通过，任务正式派发，工资 {wage}"
     else:
         conn.execute("UPDATE agent_tasks SET status='distributed' WHERE id=?", (task_id,))
         msg = "报价已打回，可重新报价"
     conn.commit()
     conn.close()
     return {"ok": True, "task_id": task_id, "msg": msg}
+
+
+def employee_confirm_price(task_id, user_id, agree):
+    """员工确认经理改价：同意 → assigned；不同意 → estimated 返回经理重新定价。"""
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    if not task:
+        conn.close()
+        return {"ok": False, "msg": "任务不存在"}
+    task = dict(task)
+    if task["status"] != "price_confirm":
+        conn.close()
+        return {"ok": False, "msg": "任务不在待确认价格状态"}
+    agent = get_agent_by_user(user_id)
+    if not agent or agent["id"] != task.get("assignee_agent"):
+        conn.close()
+        return {"ok": False, "msg": "只有任务承接人才能确认价格"}
+    if agree:
+        conn.execute("UPDATE agent_tasks SET status='assigned' WHERE id=?", (task_id,))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "status": "assigned", "msg": "已同意，任务正式派发"}
+    else:
+        conn.execute("UPDATE agent_tasks SET status='estimated' WHERE id=?", (task_id,))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "status": "estimated", "msg": "已返回，等待经理重新定价"}
 
 
 def get_task(agent_id):

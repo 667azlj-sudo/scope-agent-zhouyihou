@@ -76,6 +76,11 @@ def stats(user_id):
     return len(load_records(user_id))
 
 
+def texts(user_id):
+    """返回该用户能力知识库的文本片段列表。"""
+    return [t for t, _ in load_records(user_id)]
+
+
 def search(user_id, question, top_k=3):
     """检索该员工能力知识库，返回 [(text, score), ...]。"""
     records = load_records(user_id)
