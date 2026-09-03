@@ -462,6 +462,7 @@ class EstimateTaskIn(BaseModel):
 
 class ReviewEstimateIn(BaseModel):
     approve: bool
+    custom_wage: float = None   # 经理手动改价（可选）
 
 
 class SaveRecordIn(BaseModel):
@@ -478,6 +479,7 @@ class SubmitWorkIn(BaseModel):
 class ReviewSubmissionIn(BaseModel):
     approve: bool
     exempt: bool = None          # 可选，1=按基础工资豁免绩效
+    custom_price: float = None   # 经理手动改价（可选）
 
 
 class SetSalaryIn(BaseModel):
@@ -525,8 +527,8 @@ def estimate_task(body: EstimateTaskIn):
 
 @app.post("/api/tasks/{tid}/review-estimate")
 def review_estimate(tid: int, body: ReviewEstimateIn):
-    """经理 agent 审核报价：通过→正式派发 / 打回→重新报价"""
-    return af.review_estimate(tid, body.approve)
+    """经理 agent 审核报价：通过→正式派发(可改价) / 打回→重新报价"""
+    return af.review_estimate(tid, body.approve, body.custom_wage)
 
 
 @app.get("/api/tasks/internal")
@@ -839,8 +841,8 @@ def submit_work(body: SubmitWorkIn):
 
 @app.post("/api/submissions/{sid}/review")
 def review_submission(sid: int, body: ReviewSubmissionIn):
-    """审核提交（经理可选豁免绩效）"""
-    return af.review_submission(sid, body.approve, body.exempt)
+    """审核提交（经理可选豁免绩效 / 手动改价）"""
+    return af.review_submission(sid, body.approve, body.exempt, body.custom_price)
 
 
 @app.post("/api/salary/{uid}/set")

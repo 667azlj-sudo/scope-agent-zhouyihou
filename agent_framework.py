@@ -401,6 +401,30 @@ def _task_company_id(task):
     return dict(row)["company_id"] if row and row["company_id"] else None
 
 
+def _task_manager_user_id(task):
+    """通过任务挂的经理 agent 找到经理用户 id。"""
+    conn = get_conn()
+    mid = task.get("manager_agent")
+    row = None
+    if mid:
+        row = conn.execute("SELECT user_id FROM agents WHERE id=?", (mid,)).fetchone()
+    conn.close()
+    return dict(row)["user_id"] if row and row["user_id"] else None
+
+
+def record_pricing_decision(manager_user_id, task_title, difficulty, original, final):
+    """把经理的定价决定写进经理 agent 的能力知识库（RAG），供后续定价参考。"""
+    if not manager_user_id:
+        return
+    try:
+        import ability_kb
+        text = (f"定价决策：任务「{task_title}」难度 {difficulty}，"
+                f"员工报价 {original}，经理定价 {final}。")
+        ability_kb.add(manager_user_id, [text])
+    except Exception as e:  # noqa: BLE001
+        print(f"[pricing] 记录定价决策失败：{e}")
+
+
 def _company_employees(company_id):
     """公司内所有员工 agent（含各自工作记录 + 本地记录），供适配判断。"""
     if not company_id:
@@ -865,8 +889,11 @@ def estimate_task(agent_id, task_id):
             "conditions": conditions_text, "needs_conditions": needs}
 
 
-def review_estimate(task_id, approve):
-    """经理 agent 审核报价：通过 → assigned 并锁定 agreed_wage；打回 → distributed 重新报价。"""
+def review_estimate(task_id, approve, custom_wage=None):
+    """经理 agent 审核报价：通过 → assigned 并锁定 agreed_wage（可手动改价）；打回 → 重新报价。
+
+    custom_wage 提供且 >0 时，按经理改的价格锁定，并把决定记进经理 agent 的能力知识库。
+    """
     conn = get_conn()
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
     if not task:
@@ -877,9 +904,15 @@ def review_estimate(task_id, approve):
         conn.close()
         return {"ok": False, "msg": "任务当前不在待审核报价状态"}
     if approve:
-        conn.execute("UPDATE agent_tasks SET status='assigned', agreed_wage=estimated_wage WHERE id=?",
-                     (task_id,))
-        msg = f"报价已通过，任务正式派发，工资 {task['estimated_wage']}"
+        wage = float(task.get("estimated_wage") or 0)
+        if custom_wage is not None and float(custom_wage) > 0:
+            wage = round(float(custom_wage), 2)
+            record_pricing_decision(_task_manager_user_id(task), task["title"],
+                                    task.get("difficulty") or 0.5,
+                                    task.get("estimated_wage"), wage)
+        conn.execute("UPDATE agent_tasks SET status='assigned', agreed_wage=? WHERE id=?",
+                     (wage, task_id))
+        msg = f"报价已通过，任务正式派发，工资 {wage}"
     else:
         conn.execute("UPDATE agent_tasks SET status='distributed' WHERE id=?", (task_id,))
         msg = "报价已打回，可重新报价"
@@ -948,12 +981,13 @@ def update_salary(user_id, base_salary, exempt=0):
     return {"user_id": user_id, "base_salary": base_salary, "exempt": int(exempt)}
 
 
-def review_submission(submission_id, approve, exempt=0):
+def review_submission(submission_id, approve, exempt=0, custom_price=None):
     """审核提交。
 
     approve=True：通过，任务 -> done，按（豁免 ? 基础工资 : 绩效标价）定价；
-    approve=False：打回，任务 -> pending。
+    可传 custom_price 手动改价。approve=False：打回，任务 -> pending。
     exempt=1 时价格 = 基础工资（经理豁免白名单）。
+    改价时会记进经理 agent 的能力知识库。
     """
     conn = get_conn()
     sub = conn.execute("SELECT * FROM submissions WHERE id=?", (submission_id,)).fetchone()
@@ -986,6 +1020,13 @@ def review_submission(submission_id, approve, exempt=0):
         else:
             difficulty = task.get("difficulty") or 0.5
             price = price_task(base, difficulty)
+        # 经理手动改价
+        if custom_price is not None and float(custom_price) > 0:
+            custom = round(float(custom_price), 2)
+            if custom != price:
+                record_pricing_decision(_task_manager_user_id(task), task["title"],
+                                        task.get("difficulty") or 0.5, price, custom)
+            price = custom
         conn.execute("UPDATE submissions SET status='approved', price=? WHERE id=?",
                      (price, submission_id))
         conn.execute("UPDATE agent_tasks SET status='done' WHERE id=?", (task["id"],))

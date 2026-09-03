@@ -16,6 +16,7 @@ venv/
 uploads/
 knowledge_store.json
 llm_key.txt
+ability_kb/
 
 # 前端
 frontend/node_modules/

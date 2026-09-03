@@ -48,7 +48,7 @@ export const internalTasks = () => api("/api/tasks/internal")
 export const estimatedTasks = () => api("/api/tasks/estimated")
 export const distributeTask = (taskId, agentId) => api("/api/tasks/distribute", "POST", { task_id: taskId, agent_id: agentId })
 export const estimateTask = (taskId, agentId) => api("/api/tasks/estimate", "POST", { task_id: taskId, agent_id: agentId })
-export const reviewEstimate = (taskId, approve) => api(`/api/tasks/${taskId}/review-estimate`, "POST", { approve })
+export const reviewEstimate = (taskId, approve, customWage) => api(`/api/tasks/${taskId}/review-estimate`, "POST", { approve, custom_wage: customWage })
 export const getRecords = (uid) => api(`/api/records/${uid}`)
 export const saveRecords = (uid, content) => api(`/api/records/${uid}`, "POST", { content })
 export const getCompany = (cid) => api(`/api/companies/${cid}`)
@@ -107,7 +107,7 @@ export function uploadSubmissionImage(file) {
   fd.append("file", file)
   return fetch(`/api/submissions/image`, { method: "POST", body: fd }).then(r => r.json())
 }
-export const reviewSubmission = (sid, approve, exempt) => api(`/api/submissions/${sid}/review`, "POST", { approve, exempt })
+export const reviewSubmission = (sid, approve, exempt, customPrice) => api(`/api/submissions/${sid}/review`, "POST", { approve, exempt, custom_price: customPrice })
 export const setSalary = (uid, baseSalary, exempt) => api(`/api/salary/${uid}/set`, "POST", { base_salary: baseSalary, exempt })
 
 // 查询接口（员工端 + 经理端）

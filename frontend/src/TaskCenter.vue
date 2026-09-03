@@ -60,6 +60,12 @@
           <p v-if="t.estimate_reason" class="reason">{{ t.estimate_reason }}</p>
         </div>
         <div class="item-actions">
+          <el-input-number
+            v-model="customWageMap[t.id]"
+            :min="0" :precision="2" :step="100"
+            controls-position="right" size="small" placeholder="改价"
+            style="width: 110px"
+          />
           <el-button size="small" type="success" @click="approveEstimate(t, true)">通过</el-button>
           <el-button size="small" type="danger" plain @click="approveEstimate(t, false)">打回</el-button>
         </div>
@@ -94,7 +100,7 @@ import { ElMessage } from "element-plus"
 const props = defineProps(["user"])
 const title = ref(""), detail = ref(""), pendings = ref([]), loading = ref(false)
 const internals = ref([]), estimates = ref([]), agents = ref([]), unmatched = ref([])
-const distributeTarget = reactive({}), hallCandidates = reactive({})
+const distributeTarget = reactive({}), hallCandidates = reactive({}), customWageMap = reactive({})
 const allUsers = ref([])
 const managerAgentId = ref(null)
 
@@ -145,7 +151,7 @@ async function distribute(t) {
 }
 
 async function approveEstimate(t, ok) {
-  const r = await reviewEstimate(t.id, ok)
+  const r = await reviewEstimate(t.id, ok, customWageMap[t.id])
   ElMessage.success(r.msg || (ok ? "已通过" : "已打回"))
   await loadAll()
 }

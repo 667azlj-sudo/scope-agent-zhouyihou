@@ -22,6 +22,12 @@
             <span class="sub-exempt">
               <el-checkbox v-model="exemptMap[s.sid]">豁免绩效</el-checkbox>
             </span>
+            <el-input-number
+              v-model="customPriceMap[s.sid]"
+              :min="0" :precision="2" :step="100"
+              controls-position="right" size="small" placeholder="改价"
+              style="width: 120px"
+            />
             <div class="sub-btns">
               <el-button size="small" type="success" @click="review(s, true)">通过</el-button>
               <el-button size="small" type="danger" plain @click="review(s, false)">打回</el-button>
@@ -102,6 +108,7 @@ import { money } from "./format.js"
 const props = defineProps(["user"])
 const submissions = ref([])
 const exemptMap = reactive({})
+const customPriceMap = reactive({})
 const reviewLoading = ref(false)
 
 const payouts = ref([])
@@ -114,7 +121,7 @@ async function load() {
   try {
     const r = await getPendingSubmissions()
     submissions.value = r.submissions || []
-    submissions.value.forEach(s => { exemptMap[s.sid] = false })
+    submissions.value.forEach(s => { exemptMap[s.sid] = false; customPriceMap[s.sid] = undefined })
   } catch (e) { /* 忽略 */ }
   loadPayouts()
 }
@@ -140,7 +147,7 @@ async function pay(p) {
 async function review(s, approve) {
   reviewLoading.value = true
   try {
-    const res = await reviewSubmission(s.sid, approve, !!exemptMap[s.sid])
+    const res = await reviewSubmission(s.sid, approve, !!exemptMap[s.sid], customPriceMap[s.sid])
     ElMessage.success(res.msg || (approve ? "已通过" : "已打回"))
     await load()
   } catch (e) {
