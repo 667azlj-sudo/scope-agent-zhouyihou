@@ -267,18 +267,17 @@ def register(body: RegisterIn):
         if not ok_code:
             return {"ok": False, "msg": msg_code}
 
-    # 公司归属处理
+    # 公司归属处理：所有人必须选岗位；经理建公司，其他人（员工/普通成员）凭邀请码加入
     company_id = None
+    if not body.position.strip():
+        return {"ok": False, "msg": "请选择岗位"}
     if body.role == "manager":
         if not body.company_name.strip():
             return {"ok": False, "msg": "请填写公司名称"}
-        if not body.position.strip():
-            return {"ok": False, "msg": "请填写公司岗位"}
-    elif body.role == "employee":
+    else:
+        # 员工 / 普通成员：都必须凭经理邀请码加入公司
         if not body.invite_code.strip():
             return {"ok": False, "msg": "请填写公司邀请码"}
-        if not body.position.strip():
-            return {"ok": False, "msg": "请填写公司岗位"}
         c = company.get_company_by_code(body.invite_code)
         if not c:
             return {"ok": False, "msg": "邀请码无效"}
@@ -305,8 +304,8 @@ def register(body: RegisterIn):
         chat.add_chat_member(cid, user["id"])
         company_id = comp["id"]
 
-    # 员工：加入公司后自动进总公司群
-    if body.role == "employee" and user and company_id:
+    # 员工 / 普通成员：加入公司后自动进总公司群
+    if body.role in ("employee", "user") and user and company_id:
         cc = chat.get_company_chat(company_id)
         if cc:
             chat.add_chat_member(cc["id"], user["id"])

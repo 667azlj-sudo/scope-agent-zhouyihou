@@ -43,10 +43,10 @@
         <el-form-item v-if="role === 'manager'">
           <el-input v-model="companyName" placeholder="公司名称" />
         </el-form-item>
-        <el-form-item v-if="role === 'employee'">
+        <el-form-item v-if="role === 'employee' || role === 'user'">
           <el-input v-model="inviteCode" placeholder="公司邀请码" />
         </el-form-item>
-        <el-form-item v-if="role === 'manager' || role === 'employee'">
+        <el-form-item v-if="role">
           <el-input v-model="position" placeholder="公司岗位，如：后端工程师" />
         </el-form-item>
       </template>
@@ -106,8 +106,8 @@ async function submit() {
     if (!name.value.trim()) { ElMessage.warning("请输入用户名"); return }
     if (!role.value) { ElMessage.warning("请选择你的岗位"); return }
     if (role.value === "manager" && !companyName.value.trim()) { ElMessage.warning("请填写公司名称"); return }
-    if (role.value === "employee" && !inviteCode.value.trim()) { ElMessage.warning("请填写公司邀请码"); return }
-    if ((role.value === "manager" || role.value === "employee") && !position.value.trim()) { ElMessage.warning("请填写公司岗位"); return }
+    if ((role.value === "employee" || role.value === "user") && !inviteCode.value.trim()) { ElMessage.warning("请填写公司邀请码"); return }
+    if (!position.value.trim()) { ElMessage.warning("请填写公司岗位"); return }
   } else {
     if (!account.value.trim()) { ElMessage.warning("请输入手机号或用户名"); return }
   }
