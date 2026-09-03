@@ -3,37 +3,40 @@
     <div v-if="cid" class="chat-header">
       <el-button link type="primary" @click="$emit('back')">← 返回列表</el-button>
     </div>
-    <div class="msgs" ref="msgsRef">
-      <div v-for="m in messages" :key="m.id" class="msg-row" :class="{ mine: m.sender_id === userId }">
-        <div class="avatar">{{ (m.sender_name || "?")[0] }}</div>
-        <div class="bubble-wrap">
-          <div v-if="m.sender_id !== userId" class="name">{{ m.sender_name }}</div>
-          <div class="bubble" :class="{ min: m.sender_id === userId }">
-            <template v-if="m.status === 'withdrawn'"><span class="withdrawn">🚫 一条消息被撤回</span></template>
-            <template v-else-if="m.type === 'location'">📍 {{ m.lat }}, {{ m.lng }}</template>
-            <template v-else-if="m.type === 'image'"><img :src="m.content" class="msg-img" /></template>
-            <template v-else>{{ m.content }}</template>
+    <template v-if="cid">
+      <div class="msgs" ref="msgsRef">
+        <div v-for="m in messages" :key="m.id" class="msg-row" :class="{ mine: m.sender_id === userId }">
+          <div class="avatar">{{ (m.sender_name || "?")[0] }}</div>
+          <div class="bubble-wrap">
+            <div v-if="m.sender_id !== userId" class="name">{{ m.sender_name }}</div>
+            <div class="bubble" :class="{ min: m.sender_id === userId }">
+              <template v-if="m.status === 'withdrawn'"><span class="withdrawn">🚫 一条消息被撤回</span></template>
+              <template v-else-if="m.type === 'location'">📍 {{ m.lat }}, {{ m.lng }}</template>
+              <template v-else-if="m.type === 'image'"><img :src="m.content" class="msg-img" /></template>
+              <template v-else>{{ m.content }}</template>
+            </div>
+            <el-button
+              v-if="m.sender_id === userId && m.status !== 'withdrawn'"
+              link type="primary" size="small" @click="withdraw(m)">撤回</el-button>
           </div>
-          <el-button
-            v-if="m.sender_id === userId && m.status !== 'withdrawn'"
-            link type="primary" size="small" @click="withdraw(m)">撤回</el-button>
         </div>
+        <p v-if="!messages.length" class="empty">还没有消息</p>
       </div>
-      <p v-if="!messages.length" class="empty">还没有消息</p>
-    </div>
-    <div class="input-bar">
-      <el-input v-model="content" placeholder="输入消息..." @keyup.enter="send" />
-      <el-button type="primary" @click="send">发送</el-button>
-      <el-button @click="sendLocation">📍</el-button>
-      <el-button @click="fileInput.click()">🖼</el-button>
-      <input ref="fileInput" type="file" accept="image/*" hidden @change="sendImageFile" />
-    </div>
+      <div class="input-bar">
+        <el-input v-model="content" placeholder="输入消息..." @keyup.enter="send" />
+        <el-button type="primary" @click="send">发送</el-button>
+        <el-button @click="sendLocation">📍</el-button>
+        <el-button @click="fileInput.click()">🖼</el-button>
+        <input ref="fileInput" type="file" accept="image/*" hidden @change="sendImageFile" />
+      </div>
+    </template>
+    <p v-else class="no-chat">没有会话</p>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, nextTick } from "vue"
-import { createChat, sendMessage, getMessages, withdrawMessage, sendImage } from "./api.js"
+import { sendMessage, getMessages, withdrawMessage, sendImage } from "./api.js"
 
 const props = defineProps(["token", "userId", "cid"])
 const emit = defineEmits(["back"])
@@ -42,11 +45,8 @@ const messages = ref([]), content = ref(""), chatId = ref(null), msgsRef = ref(n
 onMounted(async () => {
   if (props.cid) {
     chatId.value = props.cid
-  } else {
-    const r = await createChat("group", "我的群聊", [props.userId, 2])
-    chatId.value = r.chat_id
+    await load()
   }
-  await load()
 })
 
 async function load() {
@@ -98,5 +98,6 @@ async function sendImageFile(e) {
 .msg-img { max-width: 220px; border-radius: 8px; display: block; }
 .withdrawn { color: #999; font-style: italic; font-size: 13px; }
 .empty { color: #999; }
+.no-chat { color: #999; text-align: center; padding: 48px 0; }
 .input-bar { display: flex; gap: 8px; }
 </style>

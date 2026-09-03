@@ -16,6 +16,7 @@ import chat
 import graphrag
 import knowledge
 import memory
+import agent_framework as af
 from splitter import split_project, set_cloud_key, is_cloud
 from router import route
 
@@ -36,6 +37,7 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # 启动时确保表存在 + 加载知识库
 db.init_db()
+af.init_agent_db()
 auth.init_users()
 chat.init_chat_db()
 knowledge.load_knowledge()
@@ -219,7 +221,7 @@ def config_graphrag(enabled: bool = Form(...)):
 class RegisterIn(BaseModel):
     name: str
     password: str
-    role: str = "user"
+    role: str  # 岗位必填，不能默认
 
 
 class LoginIn(BaseModel):
@@ -339,6 +341,129 @@ async def send_image(cid: int, token: str = Form(...), file: UploadFile = File(.
         f.write(await file.read())
     chat.send_message(cid, user["id"], f"/uploads/{file.filename}", "image")
     return {"ok": True, "msg": "已发送图片"}
+
+
+# ---- 多 Agent 协作（agent_framework）----
+class CreateAgentIn(BaseModel):
+    role_type: str
+    name: str
+    config: dict = None          # 可选，JSON 对象
+
+
+class SplitTaskIn(BaseModel):
+    title: str
+    detail: str
+    manager_agent_id: int = None
+
+
+class ClassifyTaskIn(BaseModel):
+    choice: str   # internal=机密→内部分配 / outsource=一般→外包候选
+
+
+class AssignTaskIn(BaseModel):
+    task_id: int
+    agent_id: int
+
+
+class SubmitWorkIn(BaseModel):
+    task_id: int
+    agent_id: int
+    content: str
+
+
+class ReviewSubmissionIn(BaseModel):
+    approve: bool
+    exempt: bool = None          # 可选，1=按基础工资豁免绩效
+
+
+class SetSalaryIn(BaseModel):
+    base_salary: float
+    exempt: bool
+
+
+@app.post("/api/agents/{user_id}/create")
+def create_agent(user_id: int, body: CreateAgentIn):
+    """为员工建立 Agent（user_id 唯一）"""
+    agent = af.create_agent(user_id, body.role_type, body.name, body.config)
+    return {"agent_id": agent["id"]}
+
+
+@app.post("/api/tasks/split")
+def split_task(body: SplitTaskIn):
+    """让 LLM 把任务拆成子任务并入库"""
+    subtasks = af.split_task(body.title, body.detail, body.manager_agent_id)
+    return {"subtasks": subtasks}
+
+
+@app.get("/api/tasks/pending-classify")
+def pending_classify():
+    """经理看待确认分级（pending_classify）的子任务列表"""
+    return {"tasks": af.get_pending_classification()}
+
+
+@app.post("/api/tasks/{tid}/classify")
+def classify(tid: int, body: ClassifyTaskIn):
+    """经理选择分级：internal=机密→内部分配 / outsource=一般→外包候选"""
+    return af.manager_choose(tid, body.choice)
+
+
+@app.post("/api/tasks/assign")
+def assign_task(body: AssignTaskIn):
+    """把任务派发给某个 agent"""
+    return af.assign_task(body.agent_id, body.task_id)
+
+
+@app.post("/api/submissions/submit")
+def submit_work(body: SubmitWorkIn):
+    """员工提交成果"""
+    return af.submit_work(body.task_id, body.agent_id, body.content)
+
+
+@app.post("/api/submissions/{sid}/review")
+def review_submission(sid: int, body: ReviewSubmissionIn):
+    """审核提交（经理可选豁免绩效）"""
+    return af.review_submission(sid, body.approve, body.exempt)
+
+
+@app.post("/api/salary/{uid}/set")
+def set_salary(uid: int, body: SetSalaryIn):
+    """更新员工工资与豁免标记"""
+    return af.update_salary(uid, body.base_salary, body.exempt)
+
+
+# ---- 查询接口：员工「我的任务 / 我的工资」 + 经理「工作台 / 审核」 ----
+@app.get("/api/agents/user/{uid}")
+def get_agent_by_user(uid: int):
+    """按 user_id 查员工专属 Agent（不存在返回 None）"""
+    return af.get_agent_by_user(uid)
+
+
+@app.get("/api/tasks/agent/{agent_id}")
+def get_agent_tasks(agent_id: int):
+    """员工「我的任务」：派给该 agent 的任务 + 提交反馈"""
+    return {"tasks": af.get_agent_tasks(agent_id)}
+
+
+@app.get("/api/salary/{uid}")
+def get_salary(uid: int):
+    """员工「我的工资」：基础工资 + 豁免标记"""
+    return af.get_salary(uid)
+
+
+@app.get("/api/submissions/pending")
+def get_pending_submissions():
+    """经理「审核」：待审核的提交列表"""
+    return {"submissions": af.get_pending_submissions()}
+
+
+@app.get("/api/dashboard/stats")
+def dashboard_stats():
+    """经理「工作台」：待办与团队概览"""
+    return {
+        "pending_classify": len(af.get_pending_classification()),
+        "pending_submissions": len(af.get_pending_submissions()),
+        "team_agents": af.count_agents(),
+    }
 
 
 if __name__ == "__main__":

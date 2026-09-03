@@ -36,3 +36,20 @@ export const confirmTask = (tid, user) => api(`/api/tasks/${tid}/confirm`, "POST
 export const proposeTask = (tid, user, newContent) => api(`/api/tasks/${tid}/propose`, "POST", { user, new_content: newContent })
 export const approveTask = (tid, user, approve) => api(`/api/tasks/${tid}/approve`, "POST", { user, approve })
 export const getUserChats = (uid) => api(`/api/chats/user/${uid}`)
+
+// 多 Agent
+export const createAgent = (uid, roleType, name) => api(`/api/agents/${uid}/create`, "POST", { role_type: roleType, name })
+export const splitTask = (title, detail, managerId) => api("/api/tasks/split", "POST", { title, detail, manager_agent_id: managerId })
+export const pendingClassify = () => api("/api/tasks/pending-classify")
+export const classifyTask = (tid, choice) => api(`/api/tasks/${tid}/classify`, "POST", { choice })
+export const assignTask = (taskId, agentId) => api("/api/tasks/assign", "POST", { task_id: taskId, agent_id: agentId })
+export const submitWork = (taskId, agentId, content) => api("/api/submissions/submit", "POST", { task_id: taskId, agent_id: agentId, content })
+export const reviewSubmission = (sid, approve, exempt) => api(`/api/submissions/${sid}/review`, "POST", { approve, exempt })
+export const setSalary = (uid, baseSalary, exempt) => api(`/api/salary/${uid}/set`, "POST", { base_salary: baseSalary, exempt })
+
+// 查询接口（员工端 + 经理端）
+export const getAgentByUser = (uid) => api(`/api/agents/user/${uid}`)
+export const getMyTasks = (agentId) => api(`/api/tasks/agent/${agentId}`)
+export const getSalary = (uid) => api(`/api/salary/${uid}`)
+export const getPendingSubmissions = () => api("/api/submissions/pending")
+export const getDashboardStats = () => api("/api/dashboard/stats")

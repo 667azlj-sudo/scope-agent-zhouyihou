@@ -21,3 +21,10 @@ frontend/node_modules/
 frontend/dist/
 frontend/.vite/
 frontend-pure/
+
+# 调试脚本
+test_alignment.py
+test_multiagent.py
+test_all.py
+test_api.py
+test_chat.py

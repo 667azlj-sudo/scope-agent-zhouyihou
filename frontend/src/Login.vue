@@ -2,7 +2,7 @@
   <div class="login-wrap">
     <el-form class="login-card" @submit.prevent="submit">
       <h2>Scope Agent</h2>
-      <p class="sub">企业级权责分化与智能协作系统</p>
+      <p class="sub">让每件事都有负责人</p>
       <el-form-item>
         <el-input v-model="name" placeholder="用户名" />
       </el-form-item>
@@ -10,10 +10,10 @@
         <el-input v-model="password" type="password" placeholder="密码" show-password />
       </el-form-item>
       <el-form-item v-if="isRegister">
-        <el-select v-model="role" style="width: 100%">
-          <el-option value="user" label="普通用户" />
-          <el-option value="employee" label="员工" />
+        <el-select v-model="role" style="width: 100%" placeholder="选择你的岗位">
           <el-option value="manager" label="负责人" />
+          <el-option value="employee" label="员工" />
+          <el-option value="user" label="普通成员" />
         </el-select>
       </el-form-item>
       <el-button type="primary" style="width: 100%" :loading="loading" @click="submit">
@@ -34,9 +34,13 @@ import { ElMessage } from "element-plus"
 import { login, register } from "./api.js"
 
 const emit = defineEmits(["logged-in"])
-const name = ref(""), password = ref(""), role = ref("user"), isRegister = ref(false), loading = ref(false)
+const name = ref(""), password = ref(""), role = ref(""), isRegister = ref(false), loading = ref(false)
 
 async function submit() {
+  if (isRegister.value && !role.value) {
+    ElMessage.warning("请选择你的岗位")
+    return
+  }
   loading.value = true
   try {
     if (isRegister.value) {
@@ -56,7 +60,7 @@ async function submit() {
 
 <style scoped>
 .login-wrap { display: flex; justify-content: center; align-items: center; height: 100vh; background: #f5f7fa; }
-.login-card { width: 360px; padding: 32px; background: #fff; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.login-card { width: min(360px, calc(100vw - 32px)); padding: 32px; background: #fff; border-radius: 12px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 h2 { text-align: center; margin: 0 0 4px; }
 .sub { text-align: center; color: #999; font-size: 13px; margin: 0 0 24px; }
 .switch { text-align: center; margin-top: 8px; }

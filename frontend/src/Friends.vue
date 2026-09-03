@@ -3,7 +3,7 @@
     <el-card class="box" shadow="never">
       <template #header>
         <div class="card-header">
-          <span class="title">👥 好友</span>
+          <span class="title">好友</span>
           <el-tag type="info" effect="plain">共 {{ friends.length }} 位好友</el-tag>
         </div>
       </template>
@@ -12,7 +12,7 @@
       <div class="add-bar">
         <el-input
           v-model="targetId"
-          placeholder="输入目标用户ID"
+          placeholder="输入对方的成员编号"
           type="number"
           clearable
           @keyup.enter="add"
@@ -96,7 +96,7 @@ function avatarOf(name) {
 }
 
 function roleOf(role) {
-  return role === "manager" ? "负责人" : "成员"
+  return role === "manager" ? "负责人" : role === "employee" ? "员工" : "成员"
 }
 
 onMounted(load)

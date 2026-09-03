@@ -1,5 +1,8 @@
 <template>
   <div class="chat-list">
+    <div class="chat-list-toolbar">
+      <el-button type="primary" @click="dialogVisible = true">＋ 建群</el-button>
+    </div>
     <div
       v-for="chat in chats"
       :key="chat.id"
@@ -15,26 +18,60 @@
       </div>
     </div>
     <p v-if="!chats.length" class="empty">暂无会话</p>
+
+    <el-dialog v-model="dialogVisible" title="创建群聊" width="400px">
+      <el-input v-model="newGroupName" placeholder="请输入群名" @keyup.enter="createGroup" />
+      <template #footer>
+        <el-button @click="dialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="createGroup">创建</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted } from "vue"
-import { getUserChats } from "./api.js"
+import { getUserChats, createChat } from "./api.js"
+import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
 const emit = defineEmits(["open"])
 const chats = ref([])
+const dialogVisible = ref(false)
+const newGroupName = ref("")
 
 onMounted(async () => {
   if (!props.user) return
+  await loadChats()
+})
+
+async function loadChats() {
   const r = await getUserChats(props.user.id)
   chats.value = r.chats || []
-})
+}
+
+async function createGroup() {
+  const name = newGroupName.value.trim()
+  if (!name) {
+    ElMessage.warning("请输入群名")
+    return
+  }
+  try {
+    const r = await createChat("group", name, [props.user.id, 2])
+    if (!r || !r.chat_id) { ElMessage.error("创建失败"); return }
+    dialogVisible.value = false
+    newGroupName.value = ""
+    await loadChats()
+    emit("open", r.chat_id)
+  } catch (e) {
+    ElMessage.error("创建失败")
+  }
+}
 </script>
 
 <style scoped>
 .chat-list { max-width: 700px; margin: 0 auto; }
+.chat-list-toolbar { display: flex; justify-content: flex-end; padding: 4px 0 12px; }
 .chat-item {
   display: flex;
   align-items: center;

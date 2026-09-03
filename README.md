@@ -1,73 +1,74 @@
 # Scope Agent
 
-企业级**项目权责分化与智能协作系统**。基于大语言模型自动解析项目资料，生成任务分解树与权责分配，支持团队协作与多模知识检索。
+企业团队用的**权责分工与多智能体协作**平台。接上大模型以后，系统能拆解项目、自动给子任务定保密等级、派发给成员的专属 Agent，并按任务难度给成果计价。自带一套微信风格的团队通信界面。
 
-## 核心能力
+## 能做什么
 
-- **AI 项目解析**：读取项目文档，自动生成结构化任务分解树，并标注每个任务的负责人
-- **智能路由**：简单任务由算法自动分配，模糊任务提交负责人确认（附带 AI 建议）
-- **权责审批流**：负责人拥有唯一确认/审批权，员工协商后的变更需负责人批准（状态机驱动）
-- **多模检索**：向量 + BM25 混合检索，支持 GraphRAG 图增强检索（可配置）
-- **Agent 智能体**：基于 ReAct 的多轮智能体，具备读文档、生成任务树、发送消息能力
-- **团队通信**：群聊与私聊
-- **双引擎**：本地 Ollama / 云端 LLM 双模式，通过配置切换
+- **项目拆解**：给一段目标描述，拆成一串可执行的子任务，同时标注每项的保密等级（机密 / 一般）。
+- **分级派发**：机密任务留在内部处理，一般任务可以交给外包，最终由负责人拍板。
+- **多智能体协作**：每位成员一个专属 Agent，职责内的任务自动派给它；Agent 之间能发消息、能提交成果。
+- **成果审核与计价**：员工提交成果，负责人审核；通过后按「基础工资 × 难度系数」计价，也可以对个别成员豁免绩效。
+- **团队通信**：微信风格的群聊 / 私聊，支持 2 分钟内撤回、位置卡片、图片消息。
+- **多模知识检索**：向量 + BM25 混合检索，可选 GraphRAG；配合长期记忆，Agent 越用越懂你。
+- **双模型引擎**：本地 Ollama 或云端 DeepSeek，随时切换。
+
+## 三种角色
+
+| 角色 | 看到的界面 |
+|---|---|
+| 负责人 | 工作台（待办与团队概览）、拆任务分级、审核成果、给成员定基础工资 |
+| 员工 | 我的任务（接活、提交成果、看绩效）、我的 Agent、团队消息 |
+| 普通成员 | 项目、消息、好友 |
 
 ## 技术栈
 
 | 层 | 技术 |
 |---|---|
-| LLM | Ollama（gemma4）/ DeepSeek |
+| 大模型 | Ollama（gemma4）/ DeepSeek |
 | 向量化 | bge-m3 |
 | 后端 | FastAPI + Uvicorn |
 | 数据库 | SQLite |
-| 检索 | 向量 + BM25 混合 / GraphRAG 图检索 |
+| 前端 | Vue 3 + Vite + Element Plus |
+| 检索 | 向量 + BM25 混合 / GraphRAG |
 
 ## 快速开始
 
 ```bash
+# 1. 安装依赖
 pip install -r requirements.txt
 
-# 初始化数据库并演示 AI 拆解流程
-python db.py
+# 2. 启动 Ollama（本地模型路径按自己机器设置）
+$env:OLLAMA_MODELS='D:\'
+ollama serve
 
-# 权限审批流演示
-python auth.py
+# 3. 启动后端
+uvicorn app:app --reload --host 127.0.0.1 --port 8000
 
-# 启动 Web 服务
-python app.py
-
-# 访问交互式 API 文档
-# http://127.0.0.1:8000/docs
+# 4. 启动前端（另开一个终端）
+cd frontend
+npm install
+npm run dev
 ```
 
-## 主要 API
+- 后端接口文档：<http://127.0.0.1:8000/docs>
+- 前端页面：<http://127.0.0.1:5173>
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| POST | `/api/projects` | 创建项目（解析+拆解+入库） |
-| GET | `/api/projects/{id}/tasks` | 查询项目事项 |
-| POST | `/api/tasks/{id}/confirm` | 负责人确认 |
-| POST | `/api/tasks/{id}/propose` | 员工协商 |
-| POST | `/api/tasks/{id}/approve` | 负责人审批 |
-| POST | `/api/chats` | 创建会话 |
-| POST | `/api/chats/{id}/messages` | 发送消息 |
-| POST | `/api/agent/chat` | Agent 对话（含知识检索/任务树） |
-| POST | `/api/knowledge/build` | 构建知识库 |
-| POST | `/api/config/llm` | 配置云端 LLM |
-| POST | `/api/config/graphrag` | 配置 GraphRAG 开关 |
+> 默认用本地 Ollama。想切到云端 DeepSeek，调用 `POST /api/config/llm` 填入 API Key 即可。
 
-## 项目结构
+## 目录结构
 
 ```
 scope-agent/
-├── app.py        Web 后端（FastAPI）
-├── agent.py      ReAct 智能体
-├── llm.py        双引擎 LLM 封装
-├── knowledge.py  知识库（向量+BM25 混合检索）
-├── graphrag.py   GraphRAG 图检索
-├── splitter.py   AI 项目解析
-├── router.py     任务分级路由
-├── db.py         数据持久化
-├── auth.py       权限审批流
-└── chat.py       聊天 & 文件
+├── app.py               FastAPI 后端与路由
+├── agent.py             ReAct 智能体（读文档 / 生成任务树 / 发消息）
+├── agent_framework.py   多 Agent 框架核心（任务 / 提交 / 工资）
+├── llm.py               双引擎 LLM 封装
+├── knowledge.py         知识库（向量 + BM25）
+├── graphrag.py          GraphRAG 图检索
+├── splitter.py          AI 项目拆解
+├── router.py            任务分级路由
+├── db.py                业务数据（项目 / 任务 / 用户）
+├── auth.py              注册登录与角色
+├── chat.py              会话 / 消息 / 文件 / 撤回 / 位置 / 图片
+└── frontend/            Vue 3 前端（微信风格移动端界面）
 ```

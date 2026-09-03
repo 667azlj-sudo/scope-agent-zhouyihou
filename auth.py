@@ -81,8 +81,10 @@ def verify_password(password, password_hash):
     return hash_password(password) == password_hash
 
 
-def register(name, password, role="user"):
-    """注册用户，返回 (ok, msg)"""
+def register(name, password, role):
+    """注册用户（role 必填，必须是 user/employee/manager）"""
+    if role not in ("user", "employee", "manager"):
+        return False, "角色无效，请选择岗位"
     conn = get_conn()
     try:
         conn.execute("INSERT INTO users (name, role, password_hash) VALUES (?,?,?)",
