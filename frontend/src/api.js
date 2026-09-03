@@ -41,6 +41,11 @@ export const getUserChats = (uid) => api(`/api/chats/user/${uid}`)
 // 多 Agent
 export const createAgent = (uid, roleType, name) => api(`/api/agents/${uid}/create`, "POST", { role_type: roleType, name })
 export const splitTask = (title, detail, managerId) => api("/api/tasks/split", "POST", { title, detail, manager_agent_id: managerId })
+export function uploadTaskFile(file) {
+  const fd = new FormData()
+  fd.append("file", file)
+  return fetch(`/api/tasks/file`, { method: "POST", body: fd }).then(r => r.json())
+}
 export const pendingClassify = () => api("/api/tasks/pending-classify")
 export const classifyTask = (tid, choice) => api(`/api/tasks/${tid}/classify`, "POST", { choice })
 export const listAgents = () => api("/api/agents")

@@ -501,6 +501,21 @@ def split_task(body: SplitTaskIn):
     return {"subtasks": subtasks}
 
 
+@app.post("/api/tasks/file")
+async def upload_task_file(file: UploadFile = File(...)):
+    """新建任务时上传参考文件：保存并解析文本，供拆解时并入描述。"""
+    import uuid
+    os.makedirs("uploads", exist_ok=True)
+    ext = os.path.splitext(file.filename or "")[1] or ".txt"
+    filename = f"task_{uuid.uuid4().hex[:12]}{ext}"
+    path = os.path.join("uploads", filename)
+    data = await file.read()
+    with open(path, "wb") as f:
+        f.write(data)
+    text = _read_text_bytes(data).strip()[:5000]
+    return {"ok": True, "url": f"/uploads/{filename}", "filename": file.filename, "text": text}
+
+
 @app.get("/api/tasks/pending-classify")
 def pending_classify():
     """经理看待确认分级（pending_classify）的子任务列表"""

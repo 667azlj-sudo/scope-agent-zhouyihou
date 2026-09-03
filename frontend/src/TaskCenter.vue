@@ -4,9 +4,17 @@
       <h3>新建任务</h3>
       <p class="hint">填写任务内容，系统会自动拆解成子任务，并标注是否需要保密。</p>
       <el-input v-model="title" placeholder="任务名称，例如：开发企业官网" class="mb" />
-      <el-input v-model="detail" placeholder="补充任务要求" class="mb" />
+      <el-input v-model="detail" type="textarea" :rows="2" placeholder="补充任务要求" class="mb" />
+      <div class="task-files">
+        <el-button size="small" @click="pickTaskFile">📎 上传文件</el-button>
+        <div v-for="(f, i) in taskFiles" :key="i" class="task-file-item">
+          <span>{{ f.filename }}</span>
+          <span class="file-del" @click="removeTaskFile(i)">×</span>
+        </div>
+      </div>
       <el-button type="primary" :loading="loading" @click="doSplit">拆解任务</el-button>
     </el-card>
+    <input ref="taskFileInput" type="file" multiple hidden @change="onTaskFile" />
 
     <el-card shadow="never" class="card">
       <h3>待分级</h3>
@@ -98,7 +106,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { splitTask, pendingClassify, classifyTask, getAgentByUser, listAgents, internalTasks, estimatedTasks, distributeTask, reviewEstimate, unmatchedTasks, publishToHall, getUsers } from "./api.js"
+import { splitTask, pendingClassify, classifyTask, getAgentByUser, listAgents, internalTasks, estimatedTasks, distributeTask, reviewEstimate, unmatchedTasks, publishToHall, getUsers, uploadTaskFile } from "./api.js"
 import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
@@ -107,6 +115,7 @@ const internals = ref([]), estimates = ref([]), agents = ref([]), unmatched = re
 const distributeTarget = reactive({}), hallCandidates = reactive({}), customWageMap = reactive({})
 const allUsers = ref([])
 const managerAgentId = ref(null)
+const taskFiles = ref([]), taskFileInput = ref(null)
 
 const employeeAgents = computed(() => agents.value.filter(a => a.role_type !== "manager"))
 
@@ -125,13 +134,37 @@ async function ensureManagerAgent() {
   return managerAgentId.value || props.user.id
 }
 
+function pickTaskFile() {
+  if (taskFileInput.value) taskFileInput.value.click()
+}
+
+async function onTaskFile(e) {
+  const files = Array.from(e.target.files || [])
+  for (const f of files) {
+    try {
+      const r = await uploadTaskFile(f)
+      if (r.ok) taskFiles.value.push({ filename: r.filename, text: r.text })
+    } catch (err) {
+      ElMessage.error("上传失败：" + (err.message || "请重试"))
+    }
+  }
+  e.target.value = ""
+}
+
+function removeTaskFile(i) {
+  taskFiles.value.splice(i, 1)
+}
+
 async function doSplit() {
   if (!title.value) { ElMessage.warning("请填写任务名称"); return }
   loading.value = true
   try {
     const mid = await ensureManagerAgent()
-    await splitTask(title.value, detail.value, mid)
-    title.value = ""; detail.value = ""
+    // 把上传文件解析出的文本并入任务描述
+    const fileText = taskFiles.value.map(f => f.text).filter(Boolean).join("\n")
+    const fullDetail = [detail.value, fileText].filter(Boolean).join("\n\n【附件内容】\n")
+    await splitTask(title.value, fullDetail, mid)
+    title.value = ""; detail.value = ""; taskFiles.value = []
     await loadAll()
     ElMessage.success("拆解完成，请确认分级")
   } catch (e) {
@@ -176,6 +209,9 @@ onMounted(loadAll)
 .card h3 { margin: 0 0 6px; font-size: 15px; }
 .hint { margin: 0 0 14px; font-size: 12px; color: var(--muted); }
 .mb { margin-bottom: 10px; }
+.task-files { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+.task-file-item { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); background: #f5f6f8; padding: 2px 8px; border-radius: 8px; }
+.file-del { cursor: pointer; color: #d6336c; }
 .item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--line); }
 .item:last-child { border-bottom: none; }
 .classify { align-items: flex-start; }
