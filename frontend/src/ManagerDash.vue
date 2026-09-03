@@ -29,9 +29,14 @@
           <span class="q-desc">创建任务并自动分级</span>
         </button>
         <button class="quick-card" @click="$emit('goto', 'review')">
-          <span class="q-icon">✅</span>
-          <span class="q-text">审核提交</span>
-          <span class="q-desc">查看员工提交的成果</span>
+          <span class="q-icon">💰</span>
+          <span class="q-text">财务</span>
+          <span class="q-desc">审核成果、结算打款、设置工资</span>
+        </button>
+        <button class="quick-card" @click="$emit('goto', 'billing')">
+          <span class="q-icon">📦</span>
+          <span class="q-text">套餐订阅</span>
+          <span class="q-desc">购买套餐解锁更多 Agent</span>
         </button>
         <button class="quick-card" @click="$emit('goto', 'agentmanage')">
           <span class="q-icon">🤖</span>

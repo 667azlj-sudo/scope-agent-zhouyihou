@@ -32,6 +32,33 @@
     <el-card class="panel" shadow="never">
       <template #header>
         <div class="panel-head">
+          <span class="panel-title">结算打款</span>
+          <span class="desc">待打款 {{ money(payoutStats.pending_amount) }} · 已打款 {{ money(payoutStats.paid_amount) }}</span>
+        </div>
+      </template>
+
+      <div v-if="payouts.length">
+        <div v-for="p in payouts" :key="p.id" class="sub-item">
+          <div class="sub-head">
+            <span class="sub-task">{{ p.user_name || ("员工 #" + p.user_id) }}</span>
+            <span class="payout-amount" :class="p.status">{{ money(p.amount) }}</span>
+          </div>
+          <div class="payout-meta">
+            <span>{{ p.task_title || "任务" }}</span>
+            <span>{{ p.status === "paid" ? "已打款" : "待打款" }}</span>
+          </div>
+          <div class="sub-actions">
+            <el-button v-if="p.status === 'pending'" size="small" type="primary" @click="pay(p)">打款</el-button>
+            <el-tag v-else type="success" effect="plain">已到账</el-tag>
+          </div>
+        </div>
+      </div>
+      <p v-else class="empty">还没有结算记录</p>
+    </el-card>
+
+    <el-card class="panel" shadow="never">
+      <template #header>
+        <div class="panel-head">
           <span class="panel-title">设置工资</span>
           <span class="desc">为成员设置基础工资与豁免状态</span>
         </div>
@@ -66,12 +93,16 @@
 <script setup>
 import { reactive, ref, onMounted } from "vue"
 import { ElMessage } from "element-plus"
-import { reviewSubmission, setSalary, getPendingSubmissions } from "./api.js"
+import { reviewSubmission, setSalary, getPendingSubmissions, getPayouts, payPayout } from "./api.js"
+import { money } from "./format.js"
 
 const props = defineProps(["user"])
 const submissions = ref([])
 const exemptMap = reactive({})
 const reviewLoading = ref(false)
+
+const payouts = ref([])
+const payoutStats = ref({ pending_amount: 0, paid_amount: 0 })
 
 const salaryForm = reactive({ uid: "", baseSalary: undefined, exempt: false })
 const salaryLoading = ref(false)
@@ -82,6 +113,25 @@ async function load() {
     submissions.value = r.submissions || []
     submissions.value.forEach(s => { exemptMap[s.sid] = false })
   } catch (e) { /* 忽略 */ }
+  loadPayouts()
+}
+
+async function loadPayouts() {
+  try {
+    const r = await getPayouts()
+    payouts.value = r.payouts || []
+    payoutStats.value = r.stats || { pending_amount: 0, paid_amount: 0 }
+  } catch (e) { /* 忽略 */ }
+}
+
+async function pay(p) {
+  try {
+    const res = await payPayout(p.id)
+    ElMessage.success(res.msg || "已打款")
+    await loadPayouts()
+  } catch (e) {
+    ElMessage.error("打款失败：" + (e.message || "请稍后重试"))
+  }
 }
 
 async function review(s, approve) {
@@ -127,6 +177,9 @@ onMounted(load)
 .sub-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .sub-task { font-size: 14px; font-weight: 600; }
 .sub-from { font-size: 12px; color: var(--muted); }
+.payout-amount { font-size: 16px; font-weight: 700; color: var(--brand); }
+.payout-amount.paid { color: #2e9e5b; }
+.payout-meta { display: flex; justify-content: space-between; margin: 6px 0; font-size: 12px; color: var(--muted); }
 .sub-content { margin: 8px 0; font-size: 13px; color: #4b5158; white-space: pre-wrap; }
 .sub-actions { display: flex; justify-content: space-between; align-items: center; }
 .sub-exempt { font-size: 13px; color: var(--muted); }

@@ -18,6 +18,7 @@
       <TaskCenter v-else-if="tab === 'task'" :user="user" />
       <ReviewSalary v-else-if="tab === 'review'" :user="user" />
       <AgentManage v-else-if="tab === 'agentmanage'" :user="user" />
+      <Billing v-else-if="tab === 'billing'" :user="user" />
 
       <!-- 员工 / 普通成员 -->
       <MyTasks v-else-if="tab === 'mytask'" :user="user" />
@@ -65,6 +66,7 @@ import ReviewSalary from "./ReviewSalary.vue"
 import ManagerDash from "./ManagerDash.vue"
 import MySpace from "./MySpace.vue"
 import MyTasks from "./MyTasks.vue"
+import Billing from "./Billing.vue"
 import { getUserChats } from "./api.js"
 
 function roleName(r) { return r === "manager" ? "负责人" : r === "employee" ? "员工" : "成员" }
@@ -73,7 +75,7 @@ function navFor(role) {
   if (role === "manager") return [
     { key: "work", icon: "🏠", label: "工作台" },
     { key: "task", icon: "📋", label: "任务" },
-    { key: "review", icon: "🔍", label: "审核" },
+    { key: "review", icon: "💰", label: "财务" },
     { key: "chat", icon: "💬", label: "消息" },
     { key: "friends", icon: "👥", label: "好友" },
   ]

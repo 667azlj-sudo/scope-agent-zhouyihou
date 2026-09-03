@@ -33,18 +33,30 @@
       <div class="line"><span>绑定 Agent</span><span>{{ agentName }}</span></div>
       <div class="line"><span>进行中任务</span><span>{{ activeTasks }} 项</span></div>
     </section>
+
+    <section class="card">
+      <div class="card-title">到账记录</div>
+      <div v-if="payouts.length">
+        <div v-for="p in payouts" :key="p.id" class="line">
+          <span>{{ p.task_title || "任务" }}</span>
+          <span class="paid" :class="p.status">{{ p.status === "paid" ? money(p.amount) : "待打款" }}</span>
+        </div>
+      </div>
+      <p v-else class="hint">还没有结算记录，完成并审核通过的任务会在这里到账</p>
+    </section>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, getUserPayouts } from "./api.js"
 import { roleLabel, money } from "./format.js"
 
 const props = defineProps(["user"])
 const salary = ref({ base_salary: 0, exempt: 0 })
 const agentName = ref("未绑定")
 const tasks = ref([])
+const payouts = ref([])
 
 const initial = computed(() => (props.user.name || "?")[0])
 const totalEarned = computed(() =>
@@ -64,6 +76,7 @@ onMounted(async () => {
       tasks.value = t.tasks || []
     }
   } catch (e) { /* 忽略 */ }
+  try { payouts.value = (await getUserPayouts(props.user.id)).payouts || [] } catch (e) { /* 忽略 */ }
 })
 </script>
 
@@ -87,4 +100,7 @@ onMounted(async () => {
 .line { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
 .line:last-child { border-bottom: none; }
 .line span:last-child { color: var(--ink); }
+.paid { font-weight: 600; color: var(--brand); }
+.paid.paid { color: #2e9e5b; }
+.paid.pending { color: #b7791f; }
 </style>

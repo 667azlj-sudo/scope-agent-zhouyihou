@@ -3,24 +3,50 @@
     <el-form class="login-card" @submit.prevent="submit">
       <h2>Scope Agent</h2>
       <p class="sub">让每件事都有负责人</p>
-      <el-form-item>
-        <el-input v-model="name" placeholder="用户名" />
-      </el-form-item>
-      <el-form-item>
-        <el-input v-model="password" type="password" placeholder="密码" show-password />
-      </el-form-item>
-      <el-form-item v-if="isRegister">
-        <el-select v-model="role" style="width: 100%" placeholder="选择你的岗位">
-          <el-option value="manager" label="负责人" />
-          <el-option value="employee" label="员工" />
-          <el-option value="user" label="普通成员" />
-        </el-select>
-      </el-form-item>
+
+      <!-- 登录 -->
+      <template v-if="!isRegister">
+        <el-form-item>
+          <el-input v-model="account" placeholder="手机号或用户名" />
+        </el-form-item>
+        <el-form-item>
+          <el-input v-model="password" type="password" placeholder="密码" show-password />
+        </el-form-item>
+      </template>
+
+      <!-- 注册 -->
+      <template v-else>
+        <el-form-item>
+          <div class="phone-row">
+            <el-input v-model="phone" placeholder="手机号" />
+            <el-button class="code-btn" :disabled="countdown > 0" @click="sendCode">
+              {{ countdown > 0 ? countdown + "s" : "获取验证码" }}
+            </el-button>
+          </div>
+        </el-form-item>
+        <el-form-item>
+          <el-input v-model="code" placeholder="验证码" />
+        </el-form-item>
+        <el-form-item>
+          <el-input v-model="name" placeholder="用户名" />
+        </el-form-item>
+        <el-form-item>
+          <el-input v-model="password" type="password" placeholder="密码" show-password />
+        </el-form-item>
+        <el-form-item>
+          <el-select v-model="role" style="width: 100%" placeholder="选择你的岗位">
+            <el-option value="manager" label="负责人" />
+            <el-option value="employee" label="员工" />
+            <el-option value="user" label="普通成员" />
+          </el-select>
+        </el-form-item>
+      </template>
+
       <el-button type="primary" style="width: 100%" :loading="loading" @click="submit">
         {{ isRegister ? "注册" : "登录" }}
       </el-button>
       <div class="switch">
-        <el-button link type="primary" @click="isRegister = !isRegister">
+        <el-button link type="primary" @click="toggleMode">
           {{ isRegister ? "已有账号？去登录" : "没有账号？去注册" }}
         </el-button>
       </div>
@@ -31,25 +57,59 @@
 <script setup>
 import { ref } from "vue"
 import { ElMessage } from "element-plus"
-import { login, register } from "./api.js"
+import { login, register, smsSend } from "./api.js"
 
 const emit = defineEmits(["logged-in"])
-const name = ref(""), password = ref(""), role = ref(""), isRegister = ref(false), loading = ref(false)
+const isRegister = ref(false)
+const account = ref(""), name = ref(""), password = ref("")
+const phone = ref(""), code = ref(""), role = ref("")
+const loading = ref(false), countdown = ref(0)
+let timer = null
+
+function toggleMode() {
+  isRegister.value = !isRegister.value
+  if (countdown.value > 0) { clearInterval(timer); countdown.value = 0 }
+}
+
+async function sendCode() {
+  const p = phone.value.trim()
+  if (!/^1\d{10}$/.test(p)) { ElMessage.warning("请输入正确的手机号"); return }
+  try {
+    const r = await smsSend(p)
+    if (!r.ok) { ElMessage.error(r.msg || "发送失败"); return }
+    if (r.mock && r.code) ElMessage.success("验证码（本地模拟）：" + r.code)
+    else ElMessage.success("验证码已发送，请查收短信")
+    countdown.value = 60
+    timer = setInterval(() => {
+      countdown.value -= 1
+      if (countdown.value <= 0) { clearInterval(timer); countdown.value = 0 }
+    }, 1000)
+  } catch (e) {
+    ElMessage.error("发送失败：" + (e.message || "请稍后重试"))
+  }
+}
 
 async function submit() {
-  if (isRegister.value && !role.value) {
-    ElMessage.warning("请选择你的岗位")
-    return
+  if (isRegister.value) {
+    if (!/^1\d{10}$/.test(phone.value.trim())) { ElMessage.warning("请输入正确的手机号"); return }
+    if (!code.value.trim()) { ElMessage.warning("请输入验证码"); return }
+    if (!name.value.trim()) { ElMessage.warning("请输入用户名"); return }
+    if (!role.value) { ElMessage.warning("请选择你的岗位"); return }
+  } else {
+    if (!account.value.trim()) { ElMessage.warning("请输入手机号或用户名"); return }
   }
   loading.value = true
   try {
     if (isRegister.value) {
-      const r = await register(name.value, password.value, role.value)
+      const r = await register(name.value.trim(), password.value, role.value, phone.value.trim(), code.value.trim())
       if (!r.ok) { ElMessage.error(r.msg); return }
       ElMessage.success("注册成功，请登录")
-      isRegister.value = false
+      toggleMode()
+      account.value = phone.value
+      password.value = ""
+      return
     }
-    const res = await login(name.value, password.value)
+    const res = await login(account.value.trim(), password.value)
     if (res.ok) emit("logged-in", res.user, res.token)
     else ElMessage.error(res.msg)
   } finally {
@@ -64,4 +124,7 @@ async function submit() {
 h2 { text-align: center; margin: 0 0 4px; }
 .sub { text-align: center; color: #999; font-size: 13px; margin: 0 0 24px; }
 .switch { text-align: center; margin-top: 8px; }
+.phone-row { display: flex; gap: 8px; width: 100%; }
+.phone-row .el-input { flex: 1; }
+.code-btn { flex-shrink: 0; }
 </style>

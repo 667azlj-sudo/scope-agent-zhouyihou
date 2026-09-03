@@ -16,6 +16,8 @@ import chat
 import graphrag
 import knowledge
 import memory
+import sms
+import payment
 import agent_framework as af
 from splitter import split_project, set_cloud_key, is_cloud
 from router import route
@@ -40,6 +42,7 @@ db.init_db()
 af.init_agent_db()
 auth.init_users()
 chat.init_chat_db()
+payment.init_payment_db()
 knowledge.load_knowledge()
 
 
@@ -221,25 +224,54 @@ def config_graphrag(enabled: bool = Form(...)):
 class RegisterIn(BaseModel):
     name: str
     password: str
-    role: str  # 岗位必填，不能默认
+    role: str          # 岗位必填，不能默认
+    phone: str = ""    # 手机号（需已通过验证码校验）
+    code: str = ""     # 短信验证码
 
 
 class LoginIn(BaseModel):
-    name: str
+    account: str       # 用户名或手机号
     password: str
+
+
+class SmsSendIn(BaseModel):
+    phone: str
+
+
+@app.post("/api/sms/send")
+def send_sms(body: SmsSendIn):
+    """发送短信验证码。未配置阿里云密钥时走模拟模式，验证码一并返回。"""
+    from auth import _normalize_phone
+    phone = _normalize_phone(body.phone)
+    if not phone:
+        return {"ok": False, "msg": "手机号格式不正确"}
+    code = auth.create_verify_code(phone)
+    ok, mock, msg = sms.send_sms(phone, code)
+    if not ok:
+        return {"ok": False, "msg": msg}
+    resp = {"ok": True, "msg": msg, "mock": mock}
+    if mock:
+        resp["code"] = code  # 仅模拟模式返回，方便本地联调
+    return resp
 
 
 @app.post("/api/register")
 def register(body: RegisterIn):
-    """用户注册"""
-    ok, msg = auth.register(body.name, body.password, body.role)
+    """用户注册：手机号需先通过 /api/sms/send + 验证码校验"""
+    from auth import _normalize_phone
+    phone = _normalize_phone(body.phone) if body.phone else None
+    if phone:
+        ok_code, msg_code = auth.verify_code(phone, body.code)
+        if not ok_code:
+            return {"ok": False, "msg": msg_code}
+    ok, msg = auth.register(body.name, body.password, body.role, phone)
     return {"ok": ok, "msg": msg}
 
 
 @app.post("/api/login")
 def login(body: LoginIn):
-    """用户登录，返回 token"""
-    token, result = auth.login(body.name, body.password)
+    """用户登录（账号 = 用户名或手机号），返回 token"""
+    token, result = auth.login(body.account, body.password)
     if token:
         return {"ok": True, "token": token,
                 "user": {"id": result["id"], "name": result["name"], "role": result["role"]}}
@@ -464,6 +496,55 @@ def dashboard_stats():
         "pending_submissions": len(af.get_pending_submissions()),
         "team_agents": af.count_agents(),
     }
+
+
+# ---- 工资结算 / 打款 ----
+@app.get("/api/payouts")
+def get_payouts():
+    """经理「结算」：全部结算记录（含待打款 / 已打款）"""
+    return {"payouts": af.get_payouts(), "stats": af.get_payout_stats()}
+
+
+@app.post("/api/payouts/{pid}/pay")
+def pay_payout(pid: int):
+    """经理打款：把某笔待打款置为已打款"""
+    return af.pay_payout(pid)
+
+
+@app.get("/api/payouts/user/{uid}")
+def get_user_payouts(uid: int):
+    """员工「到账记录」"""
+    return {"payouts": af.get_user_payouts(uid)}
+
+
+# ---- SaaS 套餐 / 订单 / 订阅 ----
+class CreateOrderIn(BaseModel):
+    user_id: int
+    plan_id: int
+
+
+@app.get("/api/plans")
+def get_plans():
+    """套餐列表"""
+    return {"plans": payment.get_plans()}
+
+
+@app.post("/api/orders")
+def create_order(body: CreateOrderIn):
+    """创建订单（待支付）"""
+    return payment.create_order(body.user_id, body.plan_id)
+
+
+@app.post("/api/orders/{order_no}/pay")
+def pay_order(order_no: str):
+    """模拟支付成功（真实支付网关接入后替换此逻辑）"""
+    return payment.pay_order(order_no)
+
+
+@app.get("/api/subscriptions/{uid}")
+def get_subscription(uid: int):
+    """某用户的当前订阅状态"""
+    return payment.get_subscription(uid)
 
 
 if __name__ == "__main__":

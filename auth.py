@@ -6,8 +6,12 @@ auth.py —— 权限审批流
 import hashlib
 import secrets
 import sqlite3
+import time
 
 DB_PATH = "scope_agent.db"
+
+# 验证码有效期（秒）
+SMS_CODE_TTL = 300
 
 
 def get_conn():
@@ -31,12 +35,20 @@ def init_users():
         token TEXT NOT NULL,
         user_id INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS sms_codes (
+        phone TEXT PRIMARY KEY,
+        code TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+    );
     """)
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
     if "password_hash" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT DEFAULT ''")
     if "memory" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN memory TEXT DEFAULT '{}'")
+    if "phone" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone)")
     conn.commit()
     conn.close()
 
@@ -65,6 +77,14 @@ def get_user_by_id(uid):
     return dict(row) if row else None
 
 
+def get_user_by_phone(phone):
+    """按手机号查用户，返回 dict 或 None"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM users WHERE phone=?", (phone,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def get_all_users():
     """查所有用户，返回 [dict, ...]"""
     conn = get_conn()
@@ -81,25 +101,81 @@ def verify_password(password, password_hash):
     return hash_password(password) == password_hash
 
 
-def register(name, password, role):
-    """注册用户（role 必填，必须是 user/employee/manager）"""
+def _normalize_phone(phone):
+    """校验并归一化大陆手机号，返回 11 位数字或 None"""
+    p = str(phone or "").strip()
+    if p.startswith("+86"):
+        p = p[3:]
+    if len(p) != 11 or not p.isdigit() or not p.startswith("1"):
+        return None
+    return p
+
+
+def create_verify_code(phone):
+    """生成 6 位验证码并入库，返回验证码（由调用方发送短信）。"""
+    code = f"{secrets.randbelow(1000000):06d}"
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO sms_codes (phone, code, expires_at) VALUES (?,?,?) "
+        "ON CONFLICT(phone) DO UPDATE SET code=excluded.code, expires_at=excluded.expires_at",
+        (phone, code, int(time.time()) + SMS_CODE_TTL),
+    )
+    conn.commit()
+    conn.close()
+    return code
+
+
+def verify_code(phone, code):
+    """校验验证码，成功后删除该条记录。返回 (ok, msg)。"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM sms_codes WHERE phone=?", (phone,)).fetchone()
+    if not row:
+        conn.close()
+        return False, "请先获取验证码"
+    row = dict(row)
+    if int(time.time()) > row["expires_at"]:
+        conn.execute("DELETE FROM sms_codes WHERE phone=?", (phone,))
+        conn.commit()
+        conn.close()
+        return False, "验证码已过期"
+    if row["code"] != str(code or "").strip():
+        conn.close()
+        return False, "验证码错误"
+    conn.execute("DELETE FROM sms_codes WHERE phone=?", (phone,))
+    conn.commit()
+    conn.close()
+    return True, "验证通过"
+
+
+def register(name, password, role, phone=None):
+    """注册用户（role 必填；phone 可选，注册时需已通过验证码校验）"""
     if role not in ("user", "employee", "manager"):
         return False, "角色无效，请选择岗位"
+    phone = _normalize_phone(phone) if phone else None
     conn = get_conn()
     try:
-        conn.execute("INSERT INTO users (name, role, password_hash) VALUES (?,?,?)",
-                     (name, role, hash_password(password)))
+        conn.execute(
+            "INSERT INTO users (name, role, password_hash, phone) VALUES (?,?,?,?)",
+            (name, role, hash_password(password), phone),
+        )
         conn.commit()
         return True, "注册成功"
     except sqlite3.IntegrityError:
-        return False, "用户名已存在"
+        return False, "用户名或手机号已存在"
     finally:
         conn.close()
 
 
-def login(name, password):
-    """登录，验证密码，生成 token；返回 (token, user) 或 (None, msg)"""
-    user = get_user(name)
+def login(account, password):
+    """登录（account 可以是用户名或手机号），验证密码，生成 token。
+
+    返回 (token, user) 或 (None, msg)。
+    """
+    user = get_user(account)
+    if not user:
+        phone = _normalize_phone(account)
+        if phone:
+            user = get_user_by_phone(phone)
     if not user or not verify_password(password, user.get("password_hash", "")):
         return None, "用户名或密码错误"
     token = secrets.token_hex(32)

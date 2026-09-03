@@ -82,6 +82,17 @@ def init_agent_db():
         exempt INTEGER DEFAULT 0,
         updated_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
+
+    CREATE TABLE IF NOT EXISTS payouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        submission_id INTEGER NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL,
+        agent_id INTEGER,
+        amount REAL DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        paid_at TEXT
+    );
     """)
     conn.commit()
     conn.close()
@@ -411,6 +422,14 @@ def review_submission(submission_id, approve, exempt=0):
         conn.execute("UPDATE submissions SET status='approved', price=? WHERE id=?",
                      (price, submission_id))
         conn.execute("UPDATE agent_tasks SET status='done' WHERE id=?", (task["id"],))
+        # 审核通过 → 生成一条待打款的结算记录
+        if agent:
+            conn.execute(
+                "INSERT INTO payouts (submission_id, user_id, agent_id, amount, status) "
+                "VALUES (?,?,?,?, 'pending') "
+                "ON CONFLICT(submission_id) DO UPDATE SET amount=excluded.amount, status='pending'",
+                (submission_id, agent["user_id"], agent["id"], price),
+            )
         msg = f"✅ 已通过，绩效标价 {price}"
     else:
         price = 0
@@ -482,6 +501,73 @@ def count_agents():
     n = conn.execute("SELECT COUNT(*) AS c FROM agents").fetchone()["c"]
     conn.close()
     return n
+
+
+# ---------------------------------------------------------------------------
+# 工资结算 / 打款
+# ---------------------------------------------------------------------------
+def get_payouts(status=None):
+    """结算记录列表。可选 status 过滤（pending / paid）。附员工姓名。"""
+    conn = get_conn()
+    sql = (
+        "SELECT p.*, u.name AS user_name, t.title AS task_title "
+        "FROM payouts p "
+        "LEFT JOIN users u ON u.id = p.user_id "
+        "LEFT JOIN agent_tasks t ON t.id = (SELECT task_id FROM submissions WHERE id=p.submission_id) "
+    )
+    if status:
+        sql += " WHERE p.status=?"
+        rows = conn.execute(sql + " ORDER BY p.id DESC", (status,)).fetchall()
+    else:
+        rows = conn.execute(sql + " ORDER BY p.id DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_user_payouts(user_id):
+    """某员工的到账记录（含打款状态与金额）。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT p.*, t.title AS task_title FROM payouts p "
+        "LEFT JOIN submissions s ON s.id = p.submission_id "
+        "LEFT JOIN agent_tasks t ON t.id = s.task_id "
+        "WHERE p.user_id=? ORDER BY p.id DESC",
+        (user_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def pay_payout(payout_id):
+    """经理打款：pending → paid，记录打款时间。"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM payouts WHERE id=?", (payout_id,)).fetchone()
+    if not row:
+        conn.close()
+        return {"ok": False, "msg": "结算记录不存在"}
+    if dict(row)["status"] == "paid":
+        conn.close()
+        return {"ok": False, "msg": "该笔已打款，无需重复操作"}
+    conn.execute(
+        "UPDATE payouts SET status='paid', paid_at=datetime('now','localtime') WHERE id=?",
+        (payout_id,),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "msg": "已打款"}
+
+
+def get_payout_stats():
+    """结算概览：待打款金额与已打款总额。"""
+    conn = get_conn()
+    pending = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) AS s FROM payouts WHERE status='pending'"
+    ).fetchone()["s"]
+    paid = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) AS s FROM payouts WHERE status='paid'"
+    ).fetchone()["s"]
+    conn.close()
+    return {"pending_amount": round(float(pending), 2), "paid_amount": round(float(paid), 2)}
 
 
 # ---------------------------------------------------------------------------

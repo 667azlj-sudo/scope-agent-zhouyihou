@@ -12,8 +12,9 @@ async function api(path, method = "GET", body = null, token = null) {
   return res.json()
 }
 
-export const register = (name, password, role) => api("/api/register", "POST", { name, password, role })
-export const login = (name, password) => api("/api/login", "POST", { name, password })
+export const register = (name, password, role, phone, code) => api("/api/register", "POST", { name, password, role, phone, code })
+export const login = (account, password) => api("/api/login", "POST", { account, password })
+export const smsSend = (phone) => api("/api/sms/send", "POST", { phone })
 export const agentChat = (message, userId) => api("/api/agent/chat", "POST", { message, user_id: userId })
 export const createProject = (description) => api("/api/projects", "POST", { description })
 export const getTasks = (pid) => api(`/api/projects/${pid}/tasks`)
@@ -53,3 +54,14 @@ export const getMyTasks = (agentId) => api(`/api/tasks/agent/${agentId}`)
 export const getSalary = (uid) => api(`/api/salary/${uid}`)
 export const getPendingSubmissions = () => api("/api/submissions/pending")
 export const getDashboardStats = () => api("/api/dashboard/stats")
+
+// 工资结算 / 打款
+export const getPayouts = () => api("/api/payouts")
+export const payPayout = (pid) => api(`/api/payouts/${pid}/pay`, "POST", {})
+export const getUserPayouts = (uid) => api(`/api/payouts/user/${uid}`)
+
+// SaaS 套餐 / 订单 / 订阅
+export const getPlans = () => api("/api/plans")
+export const createOrder = (userId, planId) => api("/api/orders", "POST", { user_id: userId, plan_id: planId })
+export const payOrder = (orderNo) => api(`/api/orders/${orderNo}/pay`, "POST", {})
+export const getSubscription = (uid) => api(`/api/subscriptions/${uid}`)
