@@ -11,7 +11,6 @@ from pydantic import BaseModel
 
 import db
 import auth
-import agent
 import chat
 import company
 import graphrag
@@ -198,31 +197,6 @@ def mark_chat_read(cid: int, body: MarkReadIn):
         return {"ok": False, "msg": "未登录或 token 无效"}
     chat.mark_read(cid, user["id"])
     return {"ok": True, "msg": "已读"}
-
-
-class AgentChatIn(BaseModel):
-    message: str
-    user_id: int = None
-    system: str = None
-
-
-@app.post("/api/agent/chat")
-def agent_chat(body: AgentChatIn):
-    """员工和 AI 对话（agent，含用户画像记忆 + RAG + 项目完成树）"""
-    base_prompt = (
-        "你是项目规划助手。涉及项目具体信息时用 search_knowledge 查知识库；"
-        "用户要求生成项目完成树时用 create_task_tree；需要发消息时用 send_message。")
-    # 注入用户画像记忆
-    if body.user_id:
-        user_memory = memory.get_memory(body.user_id)
-        if user_memory and user_memory != "{}":
-            base_prompt += f"\n\n【用户画像】{user_memory}"
-    sys_prompt = body.system or base_prompt
-    answer, rounds = agent.run_agent(body.message, sys_prompt)
-    # 对话后更新用户画像记忆
-    if body.user_id:
-        memory.update_memory(body.user_id, f"用户说：{body.message}\nAI：{answer}")
-    return {"answer": answer, "rounds": rounds}
 
 
 @app.post("/api/config/llm")

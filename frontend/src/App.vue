@@ -23,7 +23,6 @@
 
       <!-- 员工 / 普通成员 -->
       <MyTasks v-else-if="tab === 'mytask'" :user="user" />
-      <Agent v-else-if="tab === 'agent'" :user="user" />
       <MySpace v-else-if="tab === 'mine'" :user="user" />
       <Project v-else-if="tab === 'project'" :user="user" />
 
@@ -60,7 +59,6 @@ import Chat from "./Chat.vue"
 import ChatList from "./ChatList.vue"
 import Friends from "./Friends.vue"
 import Project from "./Project.vue"
-import Agent from "./Agent.vue"
 import AgentManage from "./AgentManage.vue"
 import TaskCenter from "./TaskCenter.vue"
 import ReviewSalary from "./ReviewSalary.vue"
@@ -83,7 +81,6 @@ function navFor(role) {
   ]
   if (role === "employee") return [
     { key: "mytask", icon: "📋", label: "任务" },
-    { key: "agent", icon: "🤖", label: "Agent" },
     { key: "chat", icon: "💬", label: "消息" },
     { key: "mine", icon: "👤", label: "我的" },
   ]
