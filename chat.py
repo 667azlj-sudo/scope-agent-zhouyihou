@@ -60,6 +60,17 @@ def init_chat_db():
         last_read_id INTEGER DEFAULT 0,
         PRIMARY KEY (chat_id, user_id)
     );
+
+    CREATE TABLE IF NOT EXISTS group_invites (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        requester_id INTEGER NOT NULL,
+        target_id INTEGER NOT NULL,
+        target_approved INTEGER DEFAULT 0,
+        manager_approved INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
     """)
     # 兼容旧表：补 messages 新字段
     mcols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
@@ -144,6 +155,110 @@ def get_chat_info(chat_id):
     row = conn.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
+
+
+def is_chat_member(chat_id, user_id):
+    """判断某人是否已在群里。"""
+    conn = get_conn()
+    row = conn.execute("SELECT id FROM chat_members WHERE chat_id=? AND user_id=?",
+                       (chat_id, user_id)).fetchone()
+    conn.close()
+    return row is not None
+
+
+# ---------------------------------------------------------------------------
+# 加群申请（员工加人需对方 + 经理双审；经理拉人则直接加）
+# ---------------------------------------------------------------------------
+def create_group_invite(chat_id, requester_id, target_id):
+    """发起加群申请。目标已在群里或已有待处理申请则拒绝。"""
+    if is_chat_member(chat_id, target_id):
+        return {"ok": False, "msg": "对方已在群里"}
+    conn = get_conn()
+    dup = conn.execute(
+        "SELECT id FROM group_invites WHERE chat_id=? AND target_id=? AND status='pending'",
+        (chat_id, target_id)).fetchone()
+    if dup:
+        conn.close()
+        return {"ok": False, "msg": "已有待处理的申请"}
+    cur = conn.execute(
+        "INSERT INTO group_invites (chat_id, requester_id, target_id) VALUES (?,?,?)",
+        (chat_id, requester_id, target_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": cur.lastrowid}
+
+
+def _invite_with_names(conn, invite_id):
+    row = conn.execute(
+        "SELECT i.*, u.name AS target_name, r.name AS requester_name, c.name AS chat_name "
+        "FROM group_invites i "
+        "JOIN users u ON u.id=i.target_id "
+        "JOIN users r ON r.id=i.requester_id "
+        "LEFT JOIN chats c ON c.id=i.chat_id "
+        "WHERE i.id=?", (invite_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_invites_for_target(user_id):
+    """被加的人：待我审核的申请（我还没表态的）。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT i.*, r.name AS requester_name, c.name AS chat_name "
+        "FROM group_invites i JOIN users r ON r.id=i.requester_id "
+        "LEFT JOIN chats c ON c.id=i.chat_id "
+        "WHERE i.target_id=? AND i.status='pending' AND i.target_approved=0 "
+        "ORDER BY i.id DESC", (user_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_pending_invites_for_manager():
+    """经理：待我审核的申请（还没审批的）。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT i.*, u.name AS target_name, r.name AS requester_name, c.name AS chat_name "
+        "FROM group_invites i JOIN users u ON u.id=i.target_id "
+        "JOIN users r ON r.id=i.requester_id "
+        "LEFT JOIN chats c ON c.id=i.chat_id "
+        "WHERE i.status='pending' AND i.manager_approved=0 "
+        "ORDER BY i.id DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def respond_group_invite(invite_id, user_id, approve, role):
+    """对方 / 经理审核加群申请。两方都同意则真正入群。"""
+    conn = get_conn()
+    inv = conn.execute("SELECT * FROM group_invites WHERE id=?", (invite_id,)).fetchone()
+    if not inv or inv["status"] != "pending":
+        conn.close()
+        return {"ok": False, "msg": "申请不存在或已处理"}
+    inv = dict(inv)
+    if role == "manager":
+        conn.execute("UPDATE group_invites SET manager_approved=? WHERE id=?",
+                     (1 if approve else 0, invite_id))
+    else:
+        if inv["target_id"] != user_id:
+            conn.close()
+            return {"ok": False, "msg": "无权处理该申请"}
+        conn.execute("UPDATE group_invites SET target_approved=? WHERE id=?",
+                     (1 if approve else 0, invite_id))
+    conn.commit()
+
+    inv2 = dict(conn.execute("SELECT * FROM group_invites WHERE id=?", (invite_id,)).fetchone())
+    if not approve:
+        conn.execute("UPDATE group_invites SET status='rejected' WHERE id=?", (invite_id,))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "msg": "已拒绝"}
+    if inv2["target_approved"] and inv2["manager_approved"]:
+        add_chat_member(inv2["chat_id"], inv2["target_id"])
+        conn.execute("UPDATE group_invites SET status='approved' WHERE id=?", (invite_id,))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "msg": "已同意并加入群聊"}
+    conn.close()
+    return {"ok": True, "msg": "已记录，等待另一方审核"}
 
 
 def send_message(chat_id, sender_id, content, msg_type="text", lat=None, lng=None):

@@ -702,6 +702,41 @@ def add_member(cid: int, body: AddMemberIn):
     return chat.add_chat_member(cid, body.user_id)
 
 
+class GroupInviteIn(BaseModel):
+    requester_id: int
+    target_id: int
+
+
+class RespondInviteIn(BaseModel):
+    user_id: int
+    approve: bool
+    role: str
+
+
+@app.post("/api/chats/{cid}/invite")
+def create_group_invite(cid: int, body: GroupInviteIn):
+    """员工发起加群申请（需对方 + 经理双审）"""
+    return chat.create_group_invite(cid, body.requester_id, body.target_id)
+
+
+@app.get("/api/invites/target/{uid}")
+def invites_for_target(uid: int):
+    """被加的人：待我审核的加群申请"""
+    return {"invites": chat.get_invites_for_target(uid)}
+
+
+@app.get("/api/invites/manager")
+def invites_for_manager():
+    """经理：待我审核的加群申请"""
+    return {"invites": chat.get_pending_invites_for_manager()}
+
+
+@app.post("/api/invites/{iid}/respond")
+def respond_invite(iid: int, body: RespondInviteIn):
+    """对方 / 经理审核加群申请"""
+    return chat.respond_group_invite(iid, body.user_id, body.approve, body.role)
+
+
 @app.post("/api/submissions/image")
 async def upload_submission_image(file: UploadFile = File(...)):
     """员工上传成果凭证照片，返回可访问的 URL"""

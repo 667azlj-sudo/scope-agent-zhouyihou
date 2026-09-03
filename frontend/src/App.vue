@@ -28,7 +28,7 @@
 
       <!-- 消息 -->
       <ChatList v-else-if="tab === 'chat' && showList" :user="user" @open="openChat" />
-      <Chat v-else-if="tab === 'chat'" :token="token" :user-id="user.id" :cid="currentChatId" @back="backToList" @read="refreshUnread" />
+      <Chat v-else-if="tab === 'chat'" :token="token" :user-id="user.id" :role="user.role" :cid="currentChatId" @back="backToList" @read="refreshUnread" />
 
       <!-- 好友 -->
       <Friends v-else-if="tab === 'friends'" :user="user" />

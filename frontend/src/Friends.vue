@@ -42,6 +42,25 @@
           <el-empty v-if="!pending.length" :image-size="60" description="暂无待审核" />
         </el-collapse-item>
 
+        <!-- 加群申请（别人加我进群，需我审核） -->
+        <el-collapse-item name="groupinvite">
+          <template #title>
+            <span class="group-title">加群申请</span>
+            <el-badge v-if="invites.length" :value="invites.length" class="group-badge" />
+          </template>
+          <div v-for="i in invites" :key="i.id" class="row">
+            <div class="row-info">
+              <span class="avatar">👥</span>
+              <span class="name">{{ i.requester_name }} 邀请你加入「{{ i.chat_name || '群聊' }}」</span>
+            </div>
+            <div class="row-actions">
+              <el-button type="success" size="small" @click="respondInvite(i.id, true)">同意</el-button>
+              <el-button type="danger" size="small" plain @click="respondInvite(i.id, false)">拒绝</el-button>
+            </div>
+          </div>
+          <el-empty v-if="!invites.length" :image-size="60" description="暂无加群申请" />
+        </el-collapse-item>
+
         <!-- 我的好友 -->
         <el-collapse-item name="friends">
           <template #title>
@@ -66,17 +85,19 @@
 
 <script setup>
 import { ref, onMounted } from "vue"
-import { getFriends, addFriend, getPendingFriends, approveFriend } from "./api.js"
+import { getFriends, addFriend, getPendingFriends, approveFriend, getInvitesForTarget, respondGroupInvite } from "./api.js"
 
 const props = defineProps(["user"])
 const friends = ref([]), pending = ref([]), targetId = ref("")
-const active = ref(["new", "friends"])
+const invites = ref([])
+const active = ref(["new", "friends", "groupinvite"])
 
 async function load() {
   friends.value = (await getFriends(props.user.id)).friends || []
   if (props.user.role === "manager") {
     pending.value = (await getPendingFriends()).pending || []
   }
+  try { invites.value = (await getInvitesForTarget(props.user.id)).invites || [] } catch (e) { /* 忽略 */ }
 }
 
 async function add() {
@@ -88,6 +109,11 @@ async function add() {
 
 async function approve(id, ok) {
   await approveFriend(id, ok, props.user.role)
+  await load()
+}
+
+async function respondInvite(iid, ok) {
+  await respondGroupInvite(iid, props.user.id, ok, props.user.role)
   await load()
 }
 

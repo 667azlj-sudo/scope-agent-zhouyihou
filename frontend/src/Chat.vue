@@ -2,6 +2,10 @@
   <div class="chat">
     <div v-if="cid" class="chat-header">
       <el-button link type="primary" @click="$emit('back')">← 返回列表</el-button>
+      <div class="chat-header-right">
+        <el-button link type="primary" size="small" @click="membersVisible = true">成员</el-button>
+        <el-button v-if="role !== 'manager'" link type="primary" size="small" @click="openAddMember">加人</el-button>
+      </div>
     </div>
     <template v-if="cid">
       <div class="msgs" ref="msgsRef">
@@ -39,19 +43,45 @@
         </div>
         <p v-if="!members.length" class="empty">暂无成员</p>
       </el-dialog>
+
+      <el-dialog v-model="membersVisible" title="群成员" width="92%">
+        <div v-for="m in members" :key="m.id" class="mention-item">
+          {{ m.name }}{{ m.position ? " · " + m.position : "" }}
+          <el-tag size="small" :type="m.role === 'manager' ? 'danger' : 'info'" effect="plain">{{ m.role === 'manager' ? '负责人' : '成员' }}</el-tag>
+        </div>
+        <p v-if="!members.length" class="empty">暂无成员</p>
+      </el-dialog>
+
+      <el-dialog v-model="addMemberVisible" title="加人进群" width="92%">
+        <div class="pick-title">选择要加的人（需对方和经理审核）</div>
+        <el-select v-model="addTargetId" placeholder="选择成员" style="width: 100%">
+          <el-option v-for="u in addableUsers" :key="u.id" :label="u.name + (u.position ? ' · ' + u.position : '')" :value="u.id" />
+        </el-select>
+        <template #footer>
+          <el-button @click="addMemberVisible = false">取消</el-button>
+          <el-button type="primary" @click="doAddMember">发起申请</el-button>
+        </template>
+      </el-dialog>
     </template>
     <p v-else class="no-chat">没有会话</p>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from "vue"
-import { sendMessage, getMessages, withdrawMessage, sendImage, markChatRead, getChatMembers } from "./api.js"
+import { ref, computed, onMounted, nextTick } from "vue"
+import { sendMessage, getMessages, withdrawMessage, sendImage, markChatRead, getChatMembers, getUsers, createGroupInvite } from "./api.js"
+import { ElMessage } from "element-plus"
 
-const props = defineProps(["token", "userId", "cid"])
+const props = defineProps(["token", "userId", "role", "cid"])
 const emit = defineEmits(["back", "read"])
 const messages = ref([]), content = ref(""), chatId = ref(null), msgsRef = ref(null), fileInput = ref(null)
 const members = ref([]), mentionVisible = ref(false)
+const membersVisible = ref(false), addMemberVisible = ref(false), allUsers = ref([]), addTargetId = ref(null)
+
+const addableUsers = computed(() => {
+  const inGroup = new Set(members.value.map(m => m.id))
+  return allUsers.value.filter(u => u.id !== props.userId && !inGroup.has(u.id))
+})
 
 onMounted(async () => {
   if (props.cid) {
@@ -63,12 +93,29 @@ onMounted(async () => {
 async function load() {
   const r = await getMessages(chatId.value)
   messages.value = r.messages || []
-  // 拉群成员（@ 用）
+  // 拉群成员（@ / 查看 / 加人用）
   try { members.value = (await getChatMembers(chatId.value)).members || [] } catch (e) { /* 忽略 */ }
+  try { allUsers.value = (await getUsers()).users || [] } catch (e) { /* 忽略 */ }
   // 打开即已读，消除红点
   try { await markChatRead(chatId.value, props.token); emit("read") } catch (e) { /* 忽略 */ }
   await nextTick()
   if (msgsRef.value) msgsRef.value.scrollTop = msgsRef.value.scrollHeight
+}
+
+function openAddMember() {
+  addTargetId.value = null
+  addMemberVisible.value = true
+}
+
+async function doAddMember() {
+  if (!addTargetId.value) { ElMessage.warning("请选择要加的人"); return }
+  try {
+    const r = await createGroupInvite(chatId.value, props.userId, addTargetId.value)
+    if (r.ok) { ElMessage.success("已发起申请，等待对方和经理审核"); addMemberVisible.value = false }
+    else ElMessage.error(r.msg || "发起失败")
+  } catch (e) {
+    ElMessage.error("发起失败")
+  }
 }
 
 function mention(m) {
@@ -112,7 +159,9 @@ async function sendImageFile(e) {
 
 <style scoped>
 .chat { max-width: 700px; margin: 0 auto; }
-.chat-header { padding-bottom: 8px; }
+.chat-header { display: flex; align-items: center; padding-bottom: 8px; }
+.chat-header-right { margin-left: auto; display: flex; gap: 4px; }
+.pick-title { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
 .msgs { height: 420px; overflow-y: auto; padding: 16px; background: #f5f5f5; border-radius: 8px; margin-bottom: 12px; }
 .msg-row { display: flex; gap: 8px; margin-bottom: 14px; }
 .msg-row.mine { flex-direction: row-reverse; }

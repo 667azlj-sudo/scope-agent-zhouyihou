@@ -30,6 +30,17 @@
       </div>
     </section>
 
+    <section v-if="groupInvites.length" class="notif-card">
+      <div class="notif-head"><span class="notif-title">加群申请（待我审核）</span></div>
+      <div v-for="i in groupInvites" :key="i.id" class="invite-row">
+        <span class="notif-text">{{ i.requester_name }} 想把 {{ i.target_name }} 加进「{{ i.chat_name || '群聊' }}」</span>
+        <div class="invite-btns">
+          <el-button size="small" type="success" @click="respondInvite(i.id, true)">同意</el-button>
+          <el-button size="small" type="danger" plain @click="respondInvite(i.id, false)">拒绝</el-button>
+        </div>
+      </div>
+    </section>
+
     <section class="stats">
       <div class="stat" @click="$emit('goto', 'task')">
         <div class="stat-num">{{ stats.pending_classify }}</div>
@@ -85,7 +96,7 @@
 
 <script setup>
 import { ref, onMounted } from "vue"
-import { getDashboardStats, getCompany, getNotifications, readNotifications } from "./api.js"
+import { getDashboardStats, getCompany, getNotifications, readNotifications, getInvitesForManager, respondGroupInvite } from "./api.js"
 import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
@@ -93,6 +104,7 @@ defineEmits(["goto"])
 const stats = ref({ pending_classify: 0, pending_submissions: 0, team_agents: 0 })
 const company = ref(null)
 const notifications = ref([])
+const groupInvites = ref([])
 
 function copyCode() {
   if (!company.value) return
@@ -105,6 +117,16 @@ async function readAll() {
   notifications.value = notifications.value.map(n => ({ ...n, is_read: 1 }))
 }
 
+async function respondInvite(iid, ok) {
+  const r = await respondGroupInvite(iid, props.user.id, ok, "manager")
+  ElMessage.success(r.msg || (ok ? "已同意" : "已拒绝"))
+  await loadInvites()
+}
+
+async function loadInvites() {
+  try { groupInvites.value = (await getInvitesForManager()).invites || [] } catch (e) { /* 忽略 */ }
+}
+
 onMounted(async () => {
   try { stats.value = await getDashboardStats() } catch (e) { /* 忽略 */ }
   if (props.user.company_id) {
@@ -114,6 +136,7 @@ onMounted(async () => {
     } catch (e) { /* 忽略 */ }
   }
   try { notifications.value = (await getNotifications(props.user.id)).notifications || [] } catch (e) { /* 忽略 */ }
+  await loadInvites()
 })
 </script>
 
@@ -138,6 +161,9 @@ onMounted(async () => {
 .dot { width: 7px; height: 7px; border-radius: 50%; background: #d1d5db; margin-top: 6px; flex-shrink: 0; }
 .dot.unread { background: #f43f5e; }
 .notif-text { font-size: 13px; color: #4b5158; }
+.invite-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.invite-row:last-child { border-bottom: none; }
+.invite-btns { display: flex; gap: 6px; flex-shrink: 0; }
 
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
 .stat { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 16px 8px; text-align: center; cursor: pointer; transition: box-shadow .15s; }

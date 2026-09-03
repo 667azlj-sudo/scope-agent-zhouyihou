@@ -78,6 +78,10 @@ export const readNotifications = (uid) => api(`/api/notifications/${uid}/read`, 
 export const createGroup = (name, memberIds) => api("/api/chats/group", "POST", { name, member_ids: memberIds })
 export const getChatMembers = (cid) => api(`/api/chats/${cid}/members`)
 export const addChatMember = (cid, userId) => api(`/api/chats/${cid}/members`, "POST", { user_id: userId })
+export const createGroupInvite = (cid, requesterId, targetId) => api(`/api/chats/${cid}/invite`, "POST", { requester_id: requesterId, target_id: targetId })
+export const getInvitesForTarget = (uid) => api(`/api/invites/target/${uid}`)
+export const getInvitesForManager = () => api("/api/invites/manager")
+export const respondGroupInvite = (iid, userId, approve, role) => api(`/api/invites/${iid}/respond`, "POST", { user_id: userId, approve, role })
 export const submitWork = (taskId, agentId, content, images) => api("/api/submissions/submit", "POST", { task_id: taskId, agent_id: agentId, content, images: images || [] })
 export const markChatRead = (cid, token) => api(`/api/chats/${cid}/read`, "POST", { token })
 export function uploadSubmissionImage(file) {
