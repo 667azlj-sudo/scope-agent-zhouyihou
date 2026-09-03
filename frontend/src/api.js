@@ -76,6 +76,7 @@ export const claimTask = (taskId, userId) => api(`/api/hall/${taskId}/claim`, "P
 
 // 外包大厅
 export const getOutsourceTasks = () => api("/api/outsource")
+export const payOutsourceDeposit = (taskId) => api(`/api/outsource/${taskId}/deposit`, "POST", {})
 export const acceptOutsource = (taskId, userId) => api(`/api/outsource/${taskId}/accept`, "POST", { user_id: userId })
 
 // 知识库① 工作记录

@@ -16,9 +16,13 @@
         <span>· {{ t.manager_name || '负责人' }}</span>
         <span>· 难度 {{ difficultyLabel(t.difficulty) }}</span>
       </div>
+      <div class="task-meta deposit-line">
+        <span>押金 ¥{{ money(t.deposit) }}</span>
+        <span v-if="t.deposit_paid" class="paid">· 已缴押金</span>
+      </div>
       <div class="task-actions">
-        <el-button v-if="user.role !== 'manager'" type="primary" size="small" @click="accept(t)">接取</el-button>
-        <el-tag v-else type="info" size="small">经理不能接单</el-tag>
+        <el-button v-if="t.deposit_paid" type="success" size="small" @click="accept(t)">接取任务</el-button>
+        <el-button v-else type="primary" size="small" @click="payDeposit(t)">缴纳押金 ¥{{ money(t.deposit) }}</el-button>
       </div>
     </div>
     <p v-if="!tasks.length" class="empty">暂无外包任务</p>
@@ -27,15 +31,24 @@
 
 <script setup>
 import { ref, onMounted } from "vue"
-import { getOutsourceTasks, acceptOutsource } from "./api.js"
-import { difficultyLabel } from "./format.js"
-import { ElMessage } from "element-plus"
+import { getOutsourceTasks, acceptOutsource, payOutsourceDeposit } from "./api.js"
+import { difficultyLabel, money } from "./format.js"
+import { ElMessage, ElMessageBox } from "element-plus"
 
 const props = defineProps(["user"])
 const tasks = ref([])
 
 async function load() {
   try { tasks.value = (await getOutsourceTasks()).tasks || [] } catch (e) { /* 忽略 */ }
+}
+
+async function payDeposit(t) {
+  try {
+    await ElMessageBox.confirm(`接取该任务需缴纳押金 ¥${money(t.deposit)}，任务验收通过后原路退回。是否缴纳？`, "缴纳押金")
+  } catch (e) { return }
+  const r = await payOutsourceDeposit(t.id)
+  if (r.ok) { ElMessage.success(r.msg || "押金已缴纳"); await load() }
+  else ElMessage.error(r.msg || "缴纳失败")
 }
 
 async function accept(t) {
@@ -60,7 +73,9 @@ onMounted(load)
 .tag.secret { background: #fdecec; color: #d6336c; }
 .tag.normal { background: #eef2ff; color: var(--brand); }
 .task-detail { margin: 8px 0 0; font-size: 13px; color: #4b5158; }
-.task-meta { display: flex; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.task-meta { display: flex; gap: 6px; margin-top: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+.task-meta.deposit-line { margin-top: 2px; color: #b7791f; }
+.task-meta .paid { color: #2e9e5b; }
 .task-actions { margin-top: 10px; }
 .empty { color: var(--muted); text-align: center; padding: 32px 0; }
 </style>

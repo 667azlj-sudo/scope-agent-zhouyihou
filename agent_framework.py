@@ -13,6 +13,7 @@ agent_framework.py —— 多 Agent 协作框架核心
   salaries        —— 员工基础工资与豁免标记
 """
 import json
+import os
 import re
 
 from dbcore import get_conn, insert_id, ensure_column, IntegrityErrors
@@ -21,6 +22,9 @@ ROLE_TYPES = ("employee", "functional", "manager")
 
 # Agent 可用工具（manager 额外多一个 review）
 BASE_TOOLS = ["query_db", "message_agent", "get_task", "submit_work"]
+
+# 外包任务押金（元）。缴纳后即可接取；任务通过审核后原路退回。
+OUTSOURCE_DEPOSIT = float(os.environ.get("OUTSOURCE_DEPOSIT", "100") or "100")
 
 
 def init_agent_db():
@@ -116,6 +120,16 @@ def init_agent_db():
         is_read INTEGER DEFAULT 0,
         created_at TEXT DEFAULT (__NOW__)
     );
+
+    CREATE TABLE IF NOT EXISTS deposits (
+        id __PK__,
+        task_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        amount REAL DEFAULT 0,
+        status TEXT DEFAULT 'paid',
+        created_at TEXT DEFAULT (__NOW__),
+        UNIQUE (task_id, user_id)
+    );
     """)
     conn.commit()
     # 迁移：agent_tasks 增加报价相关列
@@ -130,6 +144,7 @@ def init_agent_db():
     ensure_column(conn, "submissions", "images", "TEXT DEFAULT '[]'")
     ensure_column(conn, "submissions", "stage", "TEXT DEFAULT 'submitted'")
     ensure_column(conn, "submissions", "tech_reviewer", "INTEGER")
+    ensure_column(conn, "agent_tasks", "deposit", f"REAL DEFAULT {OUTSOURCE_DEPOSIT}")
     conn.commit()
     conn.close()
     # 迁移：旧表没有 classification 列的话，ALTER TABLE 补上
@@ -346,12 +361,19 @@ def _outsource_suggestion(classification, difficulty):
     return "内部", "不涉密但不算简单，建议内部处理"
 
 
-def get_pending_classification():
-    """查所有待经理确认分级（status=pending_classify）的子任务，含分类与外包建议。"""
+def get_pending_classification(company_id=None):
+    """查待经理确认分级（status=pending_classify）的子任务，含分类与外包建议。
+
+    company_id 提供时仅返回本公司任务。
+    """
     conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM agent_tasks WHERE status='pending_classify' ORDER BY id DESC"
-    ).fetchall()
+    sql = "SELECT * FROM agent_tasks WHERE status='pending_classify'"
+    if company_id:
+        sql += (" AND manager_agent IN (SELECT a.id FROM agents a "
+                "JOIN users u ON u.id=a.user_id WHERE u.company_id=?)")
+        rows = conn.execute(sql + " ORDER BY id DESC", (company_id,)).fetchall()
+    else:
+        rows = conn.execute(sql + " ORDER BY id DESC").fetchall()
     conn.close()
     out = []
     for r in rows:
@@ -399,6 +421,30 @@ def manager_choose(task_id, choice):
             resp["status"] = "unmatched"
             resp["msg"] = "无人接手，请选择候选人"
     return resp
+
+
+def get_agent_task(task_id):
+    """按 id 查 agent_tasks，返回 dict 或 None。"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_submission(submission_id):
+    """按 id 查 submissions，返回 dict 或 None。"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM submissions WHERE id=?", (submission_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_payout(payout_id):
+    """按 id 查 payouts，返回 dict 或 None。"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM payouts WHERE id=?", (payout_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def _task_company_id(task):
@@ -496,10 +542,16 @@ def detect_unmatched(task_id):
     return {"ok": True, "unmatched": True, "reason": "没有员工的工作记录与任务匹配"}
 
 
-def get_unmatched_tasks():
-    """经理端：无人接手的任务列表。"""
+def get_unmatched_tasks(company_id=None):
+    """经理端：无人接手的任务列表。company_id 提供时仅本公司。"""
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM agent_tasks WHERE status='unmatched' ORDER BY id DESC").fetchall()
+    sql = "SELECT * FROM agent_tasks WHERE status='unmatched'"
+    cond, params = _task_company_cond(company_id)
+    if cond:
+        sql += " AND " + cond
+        rows = conn.execute(sql + " ORDER BY id DESC", tuple(params)).fetchall()
+    else:
+        rows = conn.execute(sql + " ORDER BY id DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -568,8 +620,8 @@ def claim_task(task_id, user_id):
 # ---------------------------------------------------------------------------
 # 外包大厅（跨公司接单）
 # ---------------------------------------------------------------------------
-def get_outsource_tasks():
-    """外包大厅：所有待接取的外包任务（附原公司名与负责人名）。"""
+def get_outsource_tasks(user_id=None):
+    """外包大厅：所有待接取的外包任务（附原公司名、负责人名、押金与本人缴纳状态）。"""
     conn = get_conn()
     rows = conn.execute(
         "SELECT t.*, c.name AS company_name, u.name AS manager_name, "
@@ -580,12 +632,70 @@ def get_outsource_tasks():
         "LEFT JOIN companies c ON c.id = u.company_id "
         "WHERE t.status='outsource' ORDER BY t.id DESC"
     ).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["deposit"] = float(d.get("deposit") or OUTSOURCE_DEPOSIT)
+        d["deposit_paid"] = False
+        if user_id:
+            dep = conn.execute(
+                "SELECT id FROM deposits WHERE task_id=? AND user_id=? AND status='paid'",
+                (d["id"], user_id)).fetchone()
+            d["deposit_paid"] = dep is not None
+        out.append(d)
     conn.close()
-    return [dict(r) for r in rows]
+    return out
+
+
+def pay_outsource_deposit(task_id, user_id):
+    """缴纳外包任务押金（模拟支付）。返回 (ok, msg)。
+
+    任何已登录用户都可缴纳押金；缴纳后才有资格接取该外包任务。
+    """
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    if not task or task["status"] != "outsource":
+        conn.close()
+        return {"ok": False, "msg": "任务不在外包大厅待接取状态"}
+    user = conn.execute("SELECT id FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        conn.close()
+        return {"ok": False, "msg": "用户不存在"}
+    amount = float(dict(task).get("deposit") or OUTSOURCE_DEPOSIT)
+    conn.execute(
+        "INSERT INTO deposits (task_id, user_id, amount, status) VALUES (?,?,?,'paid') "
+        "ON CONFLICT(task_id, user_id) DO UPDATE SET amount=excluded.amount, status='paid'",
+        (task_id, user_id, amount),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "msg": f"已缴纳押金 ¥{amount:.2f}，可接取该任务", "deposit": amount}
+
+
+def get_outsource_deposit(task_id, user_id):
+    """查询某用户对某外包任务是否已缴押金。返回 dict 或 None。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM deposits WHERE task_id=? AND user_id=? AND status='paid'",
+        (task_id, user_id)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def refund_outsource_deposit(task_id, user_id):
+    """任务验收通过后原路退回押金。"""
+    if not user_id:
+        return
+    conn = get_conn()
+    conn.execute(
+        "UPDATE deposits SET status='refunded' WHERE task_id=? AND user_id=? AND status='paid'",
+        (task_id, user_id))
+    conn.commit()
+    conn.close()
 
 
 def accept_outsource(task_id, user_id):
-    """接取外包任务（经理不能接）→ 分发给自己 agent，进入报价流程。"""
+    """接取外包任务（所有人可接，但须先缴押金）→ 分发给自己 agent，进入报价流程。"""
     conn = get_conn()
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
     if not task or task["status"] != "outsource":
@@ -597,15 +707,26 @@ def accept_outsource(task_id, user_id):
     if not user:
         conn.close()
         return {"ok": False, "msg": "用户不存在"}
-    if user["role"] == "manager":
-        conn.close()
-        return {"ok": False, "msg": "经理不能接取外包任务"}
     user_company = user["company_id"]
+
+    # 不能接自己公司发布的外包任务（防止左手倒右手）
+    pub_company = _task_company_id(task)
+    if user_company is not None and pub_company is not None and pub_company == user_company:
+        conn.close()
+        return {"ok": False, "msg": "不能接取自己公司发布的任务"}
 
     agent = conn.execute("SELECT * FROM agents WHERE user_id=?", (user_id,)).fetchone()
     if not agent:
         conn.close()
         return {"ok": False, "msg": "你没有专属 Agent，无法接取"}
+
+    # 押金门槛：必须先缴纳押金
+    dep = conn.execute(
+        "SELECT id FROM deposits WHERE task_id=? AND user_id=? AND status='paid'",
+        (task_id, user_id)).fetchone()
+    if not dep:
+        conn.close()
+        return {"ok": False, "msg": "请先缴纳押金再接取该任务"}
 
     conn.execute(
         "UPDATE agent_tasks SET status='distributed', assignee_agent=?, "
@@ -642,18 +763,38 @@ def list_agents():
     return [dict(r) for r in rows]
 
 
-def get_internal_tasks():
-    """待经理分发的内部任务（status=internal）。"""
+def _task_company_cond(company_id):
+    """返回 (sql_where_fragment, params)：按公司过滤任务（任务挂的经理 agent 归属公司）。"""
+    if not company_id:
+        return "", []
+    return ("manager_agent IN (SELECT a.id FROM agents a "
+            "JOIN users u ON u.id=a.user_id WHERE u.company_id=?)", [company_id])
+
+
+def get_internal_tasks(company_id=None):
+    """待经理分发的内部任务（status=internal）。company_id 提供时仅本公司。"""
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM agent_tasks WHERE status='internal' ORDER BY id DESC").fetchall()
+    sql = "SELECT * FROM agent_tasks WHERE status='internal'"
+    cond, params = _task_company_cond(company_id)
+    if cond:
+        sql += " AND " + cond
+        rows = conn.execute(sql + " ORDER BY id DESC", tuple(params)).fetchall()
+    else:
+        rows = conn.execute(sql + " ORDER BY id DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
 
-def get_estimated_tasks():
-    """待经理审核报价的任务（status=estimated）。"""
+def get_estimated_tasks(company_id=None):
+    """待经理审核报价的任务（status=estimated）。company_id 提供时仅本公司。"""
     conn = get_conn()
-    rows = conn.execute("SELECT * FROM agent_tasks WHERE status='estimated' ORDER BY id DESC").fetchall()
+    sql = "SELECT * FROM agent_tasks WHERE status='estimated'"
+    cond, params = _task_company_cond(company_id)
+    if cond:
+        sql += " AND " + cond
+        rows = conn.execute(sql + " ORDER BY id DESC", tuple(params)).fetchall()
+    else:
+        rows = conn.execute(sql + " ORDER BY id DESC").fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -721,6 +862,16 @@ def get_work_records(user_id):
     rows = conn.execute("SELECT * FROM work_records WHERE user_id=? ORDER BY id DESC", (user_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_work_record_owner(record_id):
+    """返回工作记录归属用户的 company_id / id，供删除时校验。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT w.id, u.company_id FROM work_records w "
+        "JOIN users u ON u.id = w.user_id WHERE w.id=?", (record_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def delete_work_record(record_id, user_id=None):
@@ -1093,6 +1244,9 @@ def review_submission(submission_id, approve, exempt=0, custom_price=None):
                 (submission_id, agent["user_id"], agent["id"], price),
             )
         msg = f"✅ 已通过，绩效标价 {price}"
+        # 外包任务验收通过 → 退回接单押金
+        if task.get("outsource_accepter"):
+            refund_outsource_deposit(task["id"], task["outsource_accepter"])
     else:
         price = 0
         conn.execute("UPDATE submissions SET status='rejected' WHERE id=?", (submission_id,))
@@ -1148,10 +1302,13 @@ def get_agent_tasks(agent_id):
     return out
 
 
-def get_pending_submissions():
-    """经理审核：所有待审核的提交，附任务标题、提交员工、当前阶段、指定技术员。"""
+def get_pending_submissions(company_id=None):
+    """经理审核：待审核的提交，附任务标题、提交员工、当前阶段、指定技术员。
+
+    company_id 提供时仅返回本公司提交，防止跨公司越权读取。
+    """
     conn = get_conn()
-    rows = conn.execute(
+    sql = (
         "SELECT s.id AS sid, s.content, s.status, s.price, s.images, s.stage, s.tech_reviewer, "
         "       t.title AS task_title, t.difficulty, "
         "       a.name AS agent_name, a.user_id AS submitter_user_id, "
@@ -1162,8 +1319,13 @@ def get_pending_submissions():
         "JOIN agents a ON a.id = s.agent_id "
         "LEFT JOIN users u ON u.id = a.user_id "
         "LEFT JOIN users tu ON tu.id = s.tech_reviewer "
-        "WHERE s.status='pending' ORDER BY s.id DESC"
-    ).fetchall()
+        "WHERE s.status='pending'"
+    )
+    if company_id:
+        sql += " AND u.company_id=?"
+        rows = conn.execute(sql + " ORDER BY s.id DESC", (company_id,)).fetchall()
+    else:
+        rows = conn.execute(sql + " ORDER BY s.id DESC").fetchall()
     conn.close()
     out = []
     for r in rows:
@@ -1176,10 +1338,15 @@ def get_pending_submissions():
     return out
 
 
-def count_agents():
-    """团队 Agent 总数（经理工作台用）。"""
+def count_agents(company_id=None):
+    """团队 Agent 总数（经理工作台用）；company_id 提供时仅统计本公司。"""
     conn = get_conn()
-    n = conn.execute("SELECT COUNT(*) AS c FROM agents").fetchone()["c"]
+    if company_id:
+        n = conn.execute(
+            "SELECT COUNT(*) AS c FROM agents a JOIN users u ON u.id=a.user_id "
+            "WHERE u.company_id=?", (company_id,)).fetchone()["c"]
+    else:
+        n = conn.execute("SELECT COUNT(*) AS c FROM agents").fetchone()["c"]
     conn.close()
     return n
 
@@ -1344,6 +1511,9 @@ def tech_verify_submission(submission_id, user_id, approve):
             "VALUES (?,?,?,?,'pending') "
             "ON CONFLICT(submission_id) DO UPDATE SET amount=excluded.amount",
             (submission_id, agent["user_id"], agent["id"], price))
+    # 外包任务验收通过 → 退回接单押金
+    if task.get("outsource_accepter"):
+        refund_outsource_deposit(task["id"], task["outsource_accepter"])
     conn.commit()
     conn.close()
     return {"ok": True, "stage": "verified", "price": price, "msg": f"验证通过，绩效标价 {price}"}
@@ -1352,8 +1522,8 @@ def tech_verify_submission(submission_id, user_id, approve):
 # ---------------------------------------------------------------------------
 # 工资结算 / 打款
 # ---------------------------------------------------------------------------
-def get_payouts(status=None):
-    """结算记录列表。可选 status 过滤（pending / paid）。附员工姓名。"""
+def get_payouts(status=None, company_id=None):
+    """结算记录列表。可选 status 过滤（pending / paid），company_id 仅本公司。附员工姓名。"""
     conn = get_conn()
     sql = (
         "SELECT p.*, u.name AS user_name, t.title AS task_title "
@@ -1361,9 +1531,16 @@ def get_payouts(status=None):
         "LEFT JOIN users u ON u.id = p.user_id "
         "LEFT JOIN agent_tasks t ON t.id = (SELECT task_id FROM submissions WHERE id=p.submission_id) "
     )
+    conds, params = [], []
     if status:
-        sql += " WHERE p.status=?"
-        rows = conn.execute(sql + " ORDER BY p.id DESC", (status,)).fetchall()
+        conds.append("p.status=?")
+        params.append(status)
+    if company_id:
+        conds.append("u.company_id=?")
+        params.append(company_id)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+        rows = conn.execute(sql + " ORDER BY p.id DESC", tuple(params)).fetchall()
     else:
         rows = conn.execute(sql + " ORDER BY p.id DESC").fetchall()
     conn.close()
@@ -1403,25 +1580,41 @@ def pay_payout(payout_id):
     return {"ok": True, "msg": "已打款"}
 
 
-def pay_all_payouts():
-    """每月固定时间：把当月所有待打款一次性发放。"""
+def pay_all_payouts(company_id=None):
+    """每月固定时间：把当月所有待打款一次性发放。company_id 提供时仅本公司。"""
     conn = get_conn()
-    n = conn.execute("SELECT COUNT(*) AS c FROM payouts WHERE status='pending'").fetchone()["c"]
-    conn.execute("UPDATE payouts SET status='paid', paid_at=__NOW__ WHERE status='pending'")
+    if company_id:
+        pending_cond = ("status='pending' AND user_id IN "
+                        "(SELECT id FROM users WHERE company_id=?)")
+        n = conn.execute(
+            "SELECT COUNT(*) AS c FROM payouts WHERE " + pending_cond, (company_id,)).fetchone()["c"]
+        conn.execute("UPDATE payouts SET status='paid', paid_at=__NOW__ WHERE " + pending_cond,
+                     (company_id,))
+    else:
+        n = conn.execute("SELECT COUNT(*) AS c FROM payouts WHERE status='pending'").fetchone()["c"]
+        conn.execute("UPDATE payouts SET status='paid', paid_at=__NOW__ WHERE status='pending'")
     conn.commit()
     conn.close()
     return {"ok": True, "count": n, "msg": f"已发放 {n} 笔工资"}
 
 
-def get_payout_stats():
-    """结算概览：待打款金额与已打款总额。"""
+def get_payout_stats(company_id=None):
+    """结算概览：待打款金额与已打款总额。company_id 提供时仅本公司。"""
     conn = get_conn()
-    pending = conn.execute(
-        "SELECT COALESCE(SUM(amount),0) AS s FROM payouts WHERE status='pending'"
-    ).fetchone()["s"]
-    paid = conn.execute(
-        "SELECT COALESCE(SUM(amount),0) AS s FROM payouts WHERE status='paid'"
-    ).fetchone()["s"]
+    if company_id:
+        pending = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) AS s FROM payouts WHERE status='pending' "
+            "AND user_id IN (SELECT id FROM users WHERE company_id=?)", (company_id,)).fetchone()["s"]
+        paid = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) AS s FROM payouts WHERE status='paid' "
+            "AND user_id IN (SELECT id FROM users WHERE company_id=?)", (company_id,)).fetchone()["s"]
+    else:
+        pending = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) AS s FROM payouts WHERE status='pending'"
+        ).fetchone()["s"]
+        paid = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) AS s FROM payouts WHERE status='paid'"
+        ).fetchone()["s"]
     conn.close()
     return {"pending_amount": round(float(pending), 2), "paid_amount": round(float(paid), 2)}
 
@@ -1446,29 +1639,46 @@ def message_between(from_agent, to_agent, content, priority=0):
 # ---------------------------------------------------------------------------
 # 查询工具（供 agent 使用）
 # ---------------------------------------------------------------------------
-_SENSITIVE_TABLES = ("users", "sessions", "sms_codes", "orders", "subscriptions")
-_SENSITIVE_COLUMNS = ("password_hash", "password", "token")
+# 只读工具允许访问的白名单表（业务表；绝不包含 users/sessions/sms_codes 等敏感表）
+_ALLOWED_QUERY_TABLES = {
+    "agents", "agent_tasks", "submissions", "agent_messages", "salaries",
+    "payouts", "user_records", "work_records", "task_conditions",
+    "notifications", "projects", "tasks",
+}
 _MAX_QUERY_ROWS = 200
+
+
+def _extract_table_names(sql):
+    """从 SELECT 语句里粗提取 FROM/JOIN 引用的表名（小写集合）。"""
+    upper = sql.upper()
+    names = set()
+    for m in re.finditer(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)\b", upper):
+        names.add(m.group(1).lower())
+    return names
 
 
 def query_db(agent_id, sql):
     """只读查询数据库（仅允许 SELECT），供 query_db 工具使用。
 
-    安全限制：仅 SELECT、禁敏感表/字段、禁多语句与写操作、强制 LIMIT 上限。
+    安全限制：仅 SELECT、禁危险关键字/注释/引号标识符、仅白名单表、强制 LIMIT。
     """
     sql = (sql or "").strip().rstrip(";")
     upper = sql.upper()
     if not upper.startswith("SELECT"):
         return {"error": "只允许 SELECT 查询"}
-    for kw in (";", "DROP", "INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "ATTACH", "REPLACE"):
+    # 危险关键字与注释/引号标识符：一律拒绝（防止绕过）
+    for kw in (";", "DROP", "INSERT", "UPDATE", "DELETE", "ALTER", "CREATE",
+               "ATTACH", "DETACH", "REPLACE", "EXEC", "PRAGMA", "UNION",
+               "INTO", "COMMIT", "ROLLBACK", "--", "/*", "*/", '"', "`", "[", "]"):
         if kw in upper:
-            return {"error": "仅允许只读 SELECT"}
-    for t in _SENSITIVE_TABLES:
-        if f" {t.upper()} " in f" {upper} ":
-            return {"error": "禁止查询用户/会话/验证码/订单/订阅等敏感表"}
-    for c in _SENSITIVE_COLUMNS:
-        if c.upper() in upper:
-            return {"error": "禁止查询敏感字段"}
+            return {"error": "仅允许只读 SELECT（拒绝危险片段）"}
+    # 白名单表校验：FROM/JOIN 引用的表必须都在白名单内
+    tables = _extract_table_names(sql)
+    if not tables:
+        return {"error": "查询必须 FROM 白名单表"}
+    for t in tables:
+        if t not in _ALLOWED_QUERY_TABLES:
+            return {"error": f"禁止查询表 {t}"}
     if "LIMIT" not in upper:
         sql = sql + f" LIMIT {_MAX_QUERY_ROWS}"
     conn = get_conn()

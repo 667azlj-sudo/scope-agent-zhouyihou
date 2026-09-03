@@ -29,6 +29,9 @@ services:
       ALIYUN_SIGN_NAME: ${ALIYUN_SIGN_NAME:-}
       ALIYUN_TEMPLATE_CODE: ${ALIYUN_TEMPLATE_CODE:-}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      # 生产必须配置短信，否则拒绝启动（防止验证码明文返回）
+      REQUIRE_SMS: ${REQUIRE_SMS:-1}
+      OUTSOURCE_DEPOSIT: ${OUTSOURCE_DEPOSIT:-100}
     volumes:
       - app_data:/app/data
     expose:

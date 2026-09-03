@@ -47,7 +47,8 @@ app.add_middleware(
 )
 
 # ---- 鉴权：除白名单外的 /api/* 都要求登录 ----
-PUBLIC_API_PATHS = {"/api/login", "/api/register", "/api/sms/send", "/api/config/llm"}
+# 注意：/api/config/llm 会改全局云端 Key，必须登录 + 负责人角色，不能放公开白名单。
+PUBLIC_API_PATHS = {"/api/login", "/api/register", "/api/sms/send"}
 
 
 @app.middleware("http")
@@ -81,10 +82,36 @@ def require_role(*roles):
 
 
 def _self_uid(user: dict, uid: int):
-    """个人数据保护：非经理强制使用本人 id，经理可指定他人（查看下属）。"""
-    if user["role"] == "manager":
-        return uid
-    return user["id"]
+    """个人数据保护：非经理强制使用本人 id；经理仅能访问本公司成员。"""
+    if user["role"] != "manager":
+        return user["id"]
+    target = auth.get_user_by_id(uid)
+    if not target:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if target.get("company_id") != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="无权访问其他公司数据")
+    return uid
+
+
+def _require_company_task(task_id: int, user: dict):
+    """校验任务属于当前用户（经理）本公司，否则 403。返回任务 dict。"""
+    task = af.get_agent_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if af._task_company_id(task) != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="无权操作其他公司任务")
+    return task
+
+
+def _require_company_submission(submission_id: int, user: dict):
+    """校验提交属于当前用户（经理）本公司，否则 403。返回提交 dict。"""
+    sub = af.get_submission(submission_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="提交不存在")
+    task = af.get_agent_task(sub["task_id"])
+    if not task or af._task_company_id(task) != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="无权操作其他公司提交")
+    return sub
 
 
 # 挂载上传目录为静态文件（图片消息用）
@@ -114,6 +141,11 @@ async def _read_upload_bytes(file):
         raise ValueError("文件过大")
     return data
 
+# 生产环境守卫：短信未配置真实通道时，验证码会退化为明文返回，注册形同虚设。
+# 设置 REQUIRE_SMS=1 强制要求配置阿里云短信，否则拒绝启动。
+if (os.environ.get("REQUIRE_SMS", "") or "").strip() in ("1", "true", "yes") and not sms.configured():
+    raise RuntimeError("REQUIRE_SMS=1 但未配置阿里云短信密钥，拒绝启动")
+
 # 启动时确保表存在 + 加载知识库 + 从环境变量加载云端 LLM key
 db.init_db()
 af.init_agent_db()
@@ -131,16 +163,14 @@ class ProjectIn(BaseModel):
 
 
 class ConfirmIn(BaseModel):
-    user: str
+    pass
 
 
 class ProposeIn(BaseModel):
-    user: str
     new_content: str
 
 
 class ApproveIn(BaseModel):
-    user: str
     approve: bool
 
 
@@ -183,23 +213,23 @@ def get_tasks(pid: int):
 
 
 @app.post("/api/tasks/{tid}/confirm")
-def confirm(tid: int, body: ConfirmIn):
-    """负责人确认事项"""
-    ok, msg = auth.confirm_task(tid, body.user)
+def confirm(tid: int, body: ConfirmIn, user: dict = Depends(require_role("manager"))):
+    """负责人确认事项（身份取自登录态，不再信任请求体中的用户名）"""
+    ok, msg = auth.confirm_task(tid, user["name"])
     return {"ok": ok, "msg": msg}
 
 
 @app.post("/api/tasks/{tid}/propose")
-def propose(tid: int, body: ProposeIn):
-    """员工协商"""
-    ok, msg = auth.propose_change(tid, body.user, body.new_content)
+def propose(tid: int, body: ProposeIn, user: dict = Depends(_current_user)):
+    """员工协商（身份取自登录态）"""
+    ok, msg = auth.propose_change(tid, user["name"], body.new_content)
     return {"ok": ok, "msg": msg}
 
 
 @app.post("/api/tasks/{tid}/approve")
-def approve(tid: int, body: ApproveIn):
-    """负责人审批"""
-    ok, msg = auth.approve_change(tid, body.user, body.approve)
+def approve(tid: int, body: ApproveIn, user: dict = Depends(require_role("manager"))):
+    """负责人审批（身份取自登录态）"""
+    ok, msg = auth.approve_change(tid, user["name"], body.approve)
     return {"ok": ok, "msg": msg}
 
 
@@ -241,6 +271,8 @@ def post_message(cid: int, body: MessageIn):
     user = auth.get_user_by_token(body.token)
     if not user:
         return {"ok": False, "msg": "未登录或 token 无效"}
+    if not chat.is_chat_member(cid, user["id"]):
+        return {"ok": False, "msg": "你不在该会话中"}
     chat.send_message(cid, user["id"], body.content, body.msg_type, body.lat, body.lng)
     return {"ok": True, "msg": "已发送"}
 
@@ -264,8 +296,10 @@ def withdraw(mid: int, body: WithdrawIn):
 
 
 @app.get("/api/chats/{cid}/messages")
-def get_chat_messages(cid: int):
-    """获取会话消息"""
+def get_chat_messages(cid: int, user: dict = Depends(_current_user)):
+    """获取会话消息（仅会话成员可见）"""
+    if not chat.is_chat_member(cid, user["id"]):
+        raise HTTPException(status_code=403, detail="你不在该会话中")
     return {"messages": chat.get_messages(cid)}
 
 
@@ -275,13 +309,15 @@ def mark_chat_read(cid: int, body: MarkReadIn):
     user = auth.get_user_by_token(body.token)
     if not user:
         return {"ok": False, "msg": "未登录或 token 无效"}
+    if not chat.is_chat_member(cid, user["id"]):
+        return {"ok": False, "msg": "你不在该会话中"}
     chat.mark_read(cid, user["id"])
     return {"ok": True, "msg": "已读"}
 
 
 @app.post("/api/config/llm")
-def config_llm(api_key: str = Form("")):
-    """用户提交 DeepSeek API key，切换到云端模式并持久化（重启仍生效）"""
+def config_llm(api_key: str = Form(""), user: dict = Depends(require_role("manager"))):
+    """负责人设置 DeepSeek API key（全局配置，须登录 + 负责人角色）"""
     is_cloud_now = llm.persist_cloud_key(api_key)
     return {"ok": True, "msg": "已切换到 DeepSeek 云端" if is_cloud_now else "已回退本地模式",
             "mode": "cloud" if is_cloud_now else "local"}
@@ -344,11 +380,12 @@ def send_sms(body: SmsSendIn):
 def register(body: RegisterIn):
     """用户注册：手机号验证码 + 公司归属 + 岗位；注册成功自动建 Agent"""
     from auth import _normalize_phone
-    phone = _normalize_phone(body.phone) if body.phone else None
-    if phone:
-        ok_code, msg_code = auth.verify_code(phone, body.code)
-        if not ok_code:
-            return {"ok": False, "msg": msg_code}
+    phone = _normalize_phone(body.phone)
+    if not phone:
+        return {"ok": False, "msg": "手机号格式不正确"}
+    ok_code, msg_code = auth.verify_code(phone, body.code)
+    if not ok_code:
+        return {"ok": False, "msg": msg_code}
 
     # 公司归属处理：所有人必须选岗位；经理建公司，其他人（员工/普通成员）凭邀请码加入
     company_id = None
@@ -479,11 +516,8 @@ def build_knowledge(body: KnowledgeIn):
 
 
 @app.post("/api/projects/{pid}/upload")
-async def upload(pid: int, user: str = Form(...), file: UploadFile = File(...)):
-    """负责人上传资料"""
-    u = auth.get_user(user)
-    if not u or u["role"] != "manager":
-        return {"ok": False, "msg": "权限不足：只有负责人能上传"}
+async def upload(pid: int, file: UploadFile = File(...), user: dict = Depends(require_role("manager"))):
+    """负责人上传资料（身份取自登录态）"""
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     try:
         data = await _read_upload_bytes(file)
@@ -492,7 +526,7 @@ async def upload(pid: int, user: str = Form(...), file: UploadFile = File(...)):
     path = os.path.join(config.UPLOAD_DIR, _safe_upload_filename(file.filename, ALLOWED_FILE_EXTS))
     with open(path, "wb") as f:
         f.write(data)
-    fid = chat.upload_file(pid, os.path.basename(file.filename or ""), path, u["id"])
+    fid = chat.upload_file(pid, os.path.basename(file.filename or ""), path, user["id"])
     return {"ok": True, "msg": "上传成功", "file_id": fid}
 
 
@@ -522,6 +556,8 @@ async def send_image(cid: int, token: str = Form(...), file: UploadFile = File(.
     user = auth.get_user_by_token(token)
     if not user:
         return {"ok": False, "msg": "未登录或 token 无效"}
+    if not chat.is_chat_member(cid, user["id"]):
+        return {"ok": False, "msg": "你不在该会话中"}
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     try:
         data = await _read_upload_bytes(file)
@@ -591,7 +627,12 @@ class SetSalaryIn(BaseModel):
 
 @app.post("/api/agents/{user_id}/create")
 def create_agent(user_id: int, body: CreateAgentIn, user: dict = Depends(require_role("manager"))):
-    """为员工建立 Agent（user_id 唯一）"""
+    """为员工建立 Agent（仅本公司员工，user_id 唯一）"""
+    target = auth.get_user_by_id(user_id)
+    if not target:
+        return {"ok": False, "msg": "用户不存在"}
+    if target.get("company_id") != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="只能为本公司员工建 Agent")
     agent = af.create_agent(user_id, body.role_type, body.name, body.config)
     return {"agent_id": agent["id"]}
 
@@ -622,18 +663,20 @@ async def upload_task_file(file: UploadFile = File(...)):
 @app.get("/api/tasks/pending-classify")
 def pending_classify(user: dict = Depends(require_role("manager"))):
     """经理看待确认分级（pending_classify）的子任务列表"""
-    return {"tasks": af.get_pending_classification()}
+    return {"tasks": af.get_pending_classification(user.get("company_id"))}
 
 
 @app.post("/api/tasks/{tid}/classify")
 def classify(tid: int, body: ClassifyTaskIn, user: dict = Depends(require_role("manager"))):
     """经理选择分级：internal=机密→内部分配 / outsource=一般→外包候选"""
+    _require_company_task(tid, user)
     return af.manager_choose(tid, body.choice)
 
 
 @app.post("/api/tasks/distribute")
 def distribute_task(body: AssignTaskIn, user: dict = Depends(require_role("manager"))):
     """经理 agent 把内部任务分发给某个员工 agent（distributed）"""
+    _require_company_task(body.task_id, user)
     return af.distribute_task(body.agent_id, body.task_id)
 
 
@@ -649,6 +692,7 @@ def estimate_task(body: EstimateTaskIn, user: dict = Depends(_current_user)):
 @app.post("/api/tasks/{tid}/review-estimate")
 def review_estimate(tid: int, body: ReviewEstimateIn, user: dict = Depends(require_role("manager"))):
     """经理 agent 审核报价：通过→正式派发(改价则待员工确认) / 打回→重新报价"""
+    _require_company_task(tid, user)
     return af.review_estimate(tid, body.approve, body.custom_wage)
 
 
@@ -665,14 +709,14 @@ def confirm_price(tid: int, body: ConfirmPriceIn, user: dict = Depends(_current_
 
 @app.get("/api/tasks/internal")
 def internal_tasks(user: dict = Depends(require_role("manager"))):
-    """经理看待分发的内部任务"""
-    return {"tasks": af.get_internal_tasks()}
+    """经理看待分发的内部任务（本公司）"""
+    return {"tasks": af.get_internal_tasks(user.get("company_id"))}
 
 
 @app.get("/api/tasks/estimated")
 def estimated_tasks(user: dict = Depends(require_role("manager"))):
-    """经理看待审核报价的任务"""
-    return {"tasks": af.get_estimated_tasks()}
+    """经理看待审核报价的任务（本公司）"""
+    return {"tasks": af.get_estimated_tasks(user.get("company_id"))}
 
 
 class PublishHallIn(BaseModel):
@@ -685,13 +729,14 @@ class ClaimTaskIn(BaseModel):
 
 @app.get("/api/tasks/unmatched")
 def unmatched_tasks(user: dict = Depends(require_role("manager"))):
-    """经理端：无人接手的任务"""
-    return {"tasks": af.get_unmatched_tasks()}
+    """经理端：无人接手的任务（本公司）"""
+    return {"tasks": af.get_unmatched_tasks(user.get("company_id"))}
 
 
 @app.post("/api/tasks/{tid}/publish-hall")
 def publish_hall(tid: int, body: PublishHallIn, user: dict = Depends(require_role("manager"))):
     """经理选候选人后发布到任务大厅"""
+    _require_company_task(tid, user)
     return af.publish_to_hall(tid, body.candidate_ids)
 
 
@@ -712,15 +757,25 @@ class AcceptOutsourceIn(BaseModel):
     user_id: int
 
 
+class PayDepositIn(BaseModel):
+    pass
+
+
 @app.get("/api/outsource")
-def outsource_tasks():
-    """外包大厅：所有待接取的外包任务（跨公司）"""
-    return {"tasks": af.get_outsource_tasks()}
+def outsource_tasks(user: dict = Depends(_current_user)):
+    """外包大厅：所有待接取的外包任务（跨公司），附押金与本人缴纳状态"""
+    return {"tasks": af.get_outsource_tasks(user["id"])}
+
+
+@app.post("/api/outsource/{tid}/deposit")
+def pay_outsource_deposit(tid: int, body: PayDepositIn, user: dict = Depends(_current_user)):
+    """缴纳外包任务押金（缴纳后才有资格接取）"""
+    return af.pay_outsource_deposit(tid, user["id"])
 
 
 @app.post("/api/outsource/{tid}/accept")
 def accept_outsource(tid: int, body: AcceptOutsourceIn, user: dict = Depends(_current_user)):
-    """其他公司的人接取外包任务"""
+    """缴押金后接取外包任务（所有人可接）"""
     return af.accept_outsource(tid, user["id"])
 
 
@@ -745,14 +800,19 @@ def list_users(user: dict = Depends(_current_user)):
 
 @app.get("/api/companies")
 def list_companies(user: dict = Depends(require_role("manager"))):
-    """公司列表（负责人用）"""
-    return {"companies": company.list_companies()}
+    """公司列表（仅返回本公司，负责人用）"""
+    cid = user.get("company_id")
+    comp = company.get_company(cid) if cid else None
+    return {"companies": [comp] if comp else []}
 
 
 @app.get("/api/companies/by-code")
 def company_by_code(code: str):
-    """按邀请码查公司"""
-    return company.get_company_by_code(code)
+    """按邀请码查公司（仅返回公司名与邀请码，供注册加入用）"""
+    c = company.get_company_by_code(code)
+    if not c:
+        return None
+    return {"id": c["id"], "name": c["name"], "invite_code": c["invite_code"]}
 
 
 @app.get("/api/companies/{cid}")
@@ -799,8 +859,15 @@ def add_work_record(uid: int, body: WorkRecordIn, user: dict = Depends(_current_
 
 @app.delete("/api/records/work/{rid}")
 def delete_work_record(rid: int, user: dict = Depends(_current_user)):
-    uid = None if user["role"] == "manager" else user["id"]
-    return af.delete_work_record(rid, uid)
+    """删除工作记录：员工删自己的；经理仅删本公司员工的。"""
+    if user["role"] == "manager":
+        owner = af.get_work_record_owner(rid)
+        if not owner:
+            return {"ok": False, "msg": "记录不存在"}
+        if owner.get("company_id") != user.get("company_id"):
+            raise HTTPException(status_code=403, detail="无权删除其他公司记录")
+        return af.delete_work_record(rid, None)
+    return af.delete_work_record(rid, user["id"])
 
 
 def _read_text_bytes(data: bytes) -> str:
@@ -922,17 +989,28 @@ class TaskConditionIn(BaseModel):
 
 
 @app.get("/api/conditions/{company_id}")
-def get_task_conditions(company_id: int):
+def get_task_conditions(company_id: int, user: dict = Depends(_current_user)):
+    """任务条件库（仅本公司成员可见）"""
+    if user.get("company_id") != company_id:
+        raise HTTPException(status_code=403, detail="无权查看其他公司条件库")
     return {"conditions": af.get_task_conditions(company_id)}
 
 
 @app.post("/api/conditions")
 def add_task_condition(body: TaskConditionIn, user: dict = Depends(require_role("manager"))):
-    return af.add_task_condition(body.company_id, body.keywords, body.conditions)
+    """新增任务条件（仅本公司经理；company_id 以登录态为准）"""
+    cid = body.company_id if body.company_id is not None else user.get("company_id")
+    if cid != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="无权写入其他公司条件库")
+    return af.add_task_condition(cid, body.keywords, body.conditions)
 
 
 @app.delete("/api/conditions/{cid}")
 def delete_task_condition(cid: int, user: dict = Depends(require_role("manager"))):
+    """删除任务条件（仅本公司经理）"""
+    conds = af.get_task_conditions(user.get("company_id"))
+    if not any(c["id"] == cid for c in conds):
+        raise HTTPException(status_code=403, detail="无权删除其他公司条件")
     return af.delete_task_condition(cid)
 
 
@@ -972,7 +1050,10 @@ def create_group(body: CreateGroupIn, user: dict = Depends(_current_user)):
 
 
 @app.get("/api/chats/{cid}/members")
-def chat_members(cid: int):
+def chat_members(cid: int, user: dict = Depends(_current_user)):
+    """会话成员列表（仅成员可见）"""
+    if not chat.is_chat_member(cid, user["id"]):
+        raise HTTPException(status_code=403, detail="你不在该会话中")
     return {"members": chat.get_chat_members(cid), "chat": chat.get_chat_info(cid)}
 
 
@@ -1019,7 +1100,7 @@ def respond_invite(iid: int, body: RespondInviteIn, user: dict = Depends(_curren
 
 
 @app.post("/api/submissions/image")
-async def upload_submission_image(file: UploadFile = File(...)):
+async def upload_submission_image(file: UploadFile = File(...), user: dict = Depends(_current_user)):
     """员工上传成果凭证照片，返回可访问的 URL"""
     os.makedirs(config.UPLOAD_DIR, exist_ok=True)
     try:
@@ -1045,6 +1126,7 @@ def submit_work(body: SubmitWorkIn, user: dict = Depends(_current_user)):
 @app.post("/api/submissions/{sid}/review")
 def review_submission(sid: int, body: ReviewSubmissionIn, user: dict = Depends(require_role("manager"))):
     """审核提交（经理可选豁免绩效 / 手动改价）"""
+    _require_company_submission(sid, user)
     return af.review_submission(sid, body.approve, body.exempt, body.custom_price)
 
 
@@ -1064,32 +1146,52 @@ class ManagerVerifyIn(BaseModel):
 
 
 @app.post("/api/submissions/{sid}/agent-check")
-def agent_check(sid: int):
-    """阶段①：员工 agent 自检"""
+def agent_check(sid: int, user: dict = Depends(_current_user)):
+    """阶段①：员工 agent 自检（仅提交者本人）"""
+    sub = af.get_submission(sid)
+    if not sub:
+        raise HTTPException(status_code=404, detail="提交不存在")
+    agent = af.get_agent_by_user(user["id"])
+    if not agent or sub.get("agent_id") != agent["id"]:
+        raise HTTPException(status_code=403, detail="只能自检自己的提交")
     return af.agent_check_submission(sid)
 
 
 @app.post("/api/submissions/{sid}/manager-test")
 def manager_test(sid: int, user: dict = Depends(require_role("manager"))):
     """阶段②：经理 agent 跑小项目测试"""
+    _require_company_submission(sid, user)
     return af.manager_test_submission(sid)
 
 
 @app.post("/api/submissions/{sid}/manager-verify")
 def manager_verify(sid: int, body: ManagerVerifyIn, user: dict = Depends(require_role("manager"))):
     """阶段③：经理核验（可改价）"""
+    _require_company_submission(sid, user)
     return af.manager_verify_submission(sid, body.approve, body.custom_price)
 
 
 @app.post("/api/submissions/{sid}/designate-tech")
 def designate_tech(sid: int, body: DesignateTechIn, user: dict = Depends(require_role("manager"))):
-    """经理指定技术人员"""
+    """经理指定技术人员（仅本公司）"""
+    _require_company_submission(sid, user)
+    tech = auth.get_user_by_id(body.user_id)
+    if not tech or tech.get("company_id") != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="只能指定本公司技术员")
     return af.designate_tech_reviewer(sid, body.user_id)
 
 
 @app.post("/api/submissions/{sid}/tech-verify")
 def tech_verify(sid: int, body: TechVerifyIn, user: dict = Depends(_current_user)):
-    """阶段④：技术人员验证"""
+    """阶段④：技术人员验证（仅被指定的技术员或本公司经理）"""
+    sub = af.get_submission(sid)
+    if not sub:
+        raise HTTPException(status_code=404, detail="提交不存在")
+    if user["role"] != "manager":
+        if not sub.get("tech_reviewer") or sub["tech_reviewer"] != user["id"]:
+            raise HTTPException(status_code=403, detail="你不是被指定的技术员")
+    else:
+        _require_company_submission(sid, user)
     return af.tech_verify_submission(sid, user["id"], body.approve)
 
 
@@ -1099,24 +1201,34 @@ class PayModeIn(BaseModel):
 
 
 @app.get("/api/company/{cid}/pay-mode")
-def get_pay_mode(cid: int):
+def get_pay_mode(cid: int, user: dict = Depends(_current_user)):
+    """查询公司工资发放方式（仅本公司成员）"""
+    if user.get("company_id") != cid:
+        raise HTTPException(status_code=403, detail="无权查看其他公司")
     return {"pay_mode": company.get_pay_mode(cid)}
 
 
 @app.post("/api/company/{cid}/pay-mode")
 def set_pay_mode(cid: int, body: PayModeIn, user: dict = Depends(require_role("manager"))):
+    if user.get("company_id") != cid:
+        raise HTTPException(status_code=403, detail="无权操作其他公司")
     return company.set_pay_mode(cid, body.pay_mode)
 
 
 @app.post("/api/payouts/pay-all")
 def pay_all_payouts(user: dict = Depends(require_role("manager"))):
-    """每月固定时间：一次性发放所有待打款工资"""
-    return af.pay_all_payouts()
+    """每月固定时间：一次性发放本公司所有待打款工资"""
+    return af.pay_all_payouts(user.get("company_id"))
 
 
 @app.post("/api/salary/{uid}/set")
 def set_salary(uid: int, body: SetSalaryIn, user: dict = Depends(require_role("manager"))):
-    """更新员工工资与豁免标记"""
+    """更新员工工资与豁免标记（仅本公司员工）"""
+    target = auth.get_user_by_id(uid)
+    if not target:
+        return {"ok": False, "msg": "用户不存在"}
+    if target.get("company_id") != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="无权操作其他公司员工")
     return af.update_salary(uid, body.base_salary, body.exempt)
 
 
@@ -1129,8 +1241,20 @@ def get_agent_by_user(uid: int, user: dict = Depends(_current_user)):
 
 
 @app.get("/api/tasks/agent/{agent_id}")
-def get_agent_tasks(agent_id: int):
-    """员工「我的任务」：派给该 agent 的任务 + 提交反馈"""
+def get_agent_tasks(agent_id: int, user: dict = Depends(_current_user)):
+    """员工「我的任务」：派给该 agent 的任务 + 提交反馈。
+
+    员工只能看自己的 Agent；经理可看本公司员工的 Agent。
+    """
+    agent = af.get_agent(agent_id)
+    if not agent:
+        return {"tasks": []}
+    if user["role"] != "manager" and agent.get("user_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="只能查看自己的任务")
+    if user["role"] == "manager":
+        owner = auth.get_user_by_id(agent.get("user_id"))
+        if not owner or owner.get("company_id") != user.get("company_id"):
+            raise HTTPException(status_code=403, detail="只能查看本公司员工的任务")
     return {"tasks": af.get_agent_tasks(agent_id)}
 
 
@@ -1143,30 +1267,38 @@ def get_salary(uid: int, user: dict = Depends(_current_user)):
 
 @app.get("/api/submissions/pending")
 def get_pending_submissions(user: dict = Depends(require_role("manager"))):
-    """经理「审核」：待审核的提交列表"""
-    return {"submissions": af.get_pending_submissions()}
+    """经理「审核」：待审核的提交列表（本公司）"""
+    return {"submissions": af.get_pending_submissions(user.get("company_id"))}
 
 
 @app.get("/api/dashboard/stats")
 def dashboard_stats(user: dict = Depends(require_role("manager"))):
-    """经理「工作台」：待办与团队概览"""
+    """经理「工作台」：待办与团队概览（本公司）"""
+    cid = user.get("company_id")
     return {
-        "pending_classify": len(af.get_pending_classification()),
-        "pending_submissions": len(af.get_pending_submissions()),
-        "team_agents": af.count_agents(),
+        "pending_classify": len(af.get_pending_classification(cid)),
+        "pending_submissions": len(af.get_pending_submissions(cid)),
+        "team_agents": af.count_agents(cid),
     }
 
 
 # ---- 工资结算 / 打款 ----
 @app.get("/api/payouts")
 def get_payouts(user: dict = Depends(require_role("manager"))):
-    """经理「结算」：全部结算记录（含待打款 / 已打款）"""
-    return {"payouts": af.get_payouts(), "stats": af.get_payout_stats()}
+    """经理「结算」：本公司结算记录（含待打款 / 已打款）"""
+    cid = user.get("company_id")
+    return {"payouts": af.get_payouts(company_id=cid), "stats": af.get_payout_stats(cid)}
 
 
 @app.post("/api/payouts/{pid}/pay")
 def pay_payout(pid: int, user: dict = Depends(require_role("manager"))):
-    """经理打款：把某笔待打款置为已打款"""
+    """经理打款：把某笔待打款置为已打款（仅本公司）"""
+    payout = af.get_payout(pid)
+    if not payout:
+        raise HTTPException(status_code=404, detail="结算记录不存在")
+    owner = auth.get_user_by_id(payout.get("user_id"))
+    if not owner or owner.get("company_id") != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="无权操作其他公司打款")
     return af.pay_payout(pid)
 
 
