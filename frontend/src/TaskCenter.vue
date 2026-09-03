@@ -69,14 +69,14 @@
 
     <el-card shadow="never" class="card">
       <h3>无人接手</h3>
-      <p class="hint">模型查知识库后没找到合适人选，请选择候选人并发布到任务大厅，等候选人接取。</p>
+      <p class="hint">模型查知识库后没找到合适人选，请从所有用户里选候选人并发布到任务大厅，等候选人接取。</p>
       <div v-for="t in unmatched" :key="t.id" class="item">
         <div class="item-main">
           <span class="title">{{ t.title }}</span>
         </div>
         <div class="hall">
           <el-select v-model="hallCandidates[t.id]" multiple collapse-tags placeholder="选候选人" size="small" style="min-width: 200px">
-            <el-option v-for="m in companyMembers" :key="m.id" :label="m.name + (m.position ? ' · ' + m.position : '')" :value="m.id" />
+            <el-option v-for="m in allUsers" :key="m.id" :label="m.name + (m.position ? ' · ' + m.position : '')" :value="m.id" />
           </el-select>
           <el-button size="small" type="primary" @click="publishHall(t)">发布大厅</el-button>
         </div>
@@ -88,14 +88,14 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { splitTask, pendingClassify, classifyTask, getAgentByUser, listAgents, internalTasks, estimatedTasks, distributeTask, reviewEstimate, unmatchedTasks, publishToHall, getCompany } from "./api.js"
+import { splitTask, pendingClassify, classifyTask, getAgentByUser, listAgents, internalTasks, estimatedTasks, distributeTask, reviewEstimate, unmatchedTasks, publishToHall, getUsers } from "./api.js"
 import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
 const title = ref(""), detail = ref(""), pendings = ref([]), loading = ref(false)
 const internals = ref([]), estimates = ref([]), agents = ref([]), unmatched = ref([])
 const distributeTarget = reactive({}), hallCandidates = reactive({})
-const companyMembers = ref([])
+const allUsers = ref([])
 const managerAgentId = ref(null)
 
 const employeeAgents = computed(() => agents.value.filter(a => a.role_type !== "manager"))
@@ -106,12 +106,7 @@ async function loadAll() {
   try { estimates.value = (await estimatedTasks()).tasks || [] } catch (e) { /* 忽略 */ }
   try { agents.value = (await listAgents()).agents || [] } catch (e) { /* 忽略 */ }
   try { unmatched.value = (await unmatchedTasks()).tasks || [] } catch (e) { /* 忽略 */ }
-  if (props.user.company_id) {
-    try {
-      const r = await getCompany(props.user.company_id)
-      if (r.ok) companyMembers.value = r.members || []
-    } catch (e) { /* 忽略 */ }
-  }
+  try { allUsers.value = (await getUsers()).users || [] } catch (e) { /* 忽略 */ }
 }
 
 async function ensureManagerAgent() {
