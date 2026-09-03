@@ -1,26 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-splitter.py —— AI 拆解引擎（双模式）
-默认用本地 gemma4（免费，不需要 key）；用户在页面填 DeepSeek key 后，自动切换云端 DeepSeek。
+splitter.py —— AI 拆解引擎
+
+统一走 llm.chat()（云端 DeepSeek 优先，未配置 key 时回退本地）。
 """
 import sys
 
-import ollama
-from openai import OpenAI
-
-# 云端 LLM 客户端（配置 API key 时启用，否则用本地模型）
-_cloud_client = None
+import llm
 
 
 def set_cloud_key(api_key):
-    """用户提交 DeepSeek API key 后调用，切换到云端模式"""
-    global _cloud_client
-    _cloud_client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+    """切换到云端 DeepSeek（转发给 llm 模块）。"""
+    return llm.set_cloud_key(api_key)
 
 
 def is_cloud():
     """当前是否用云端 DeepSeek"""
-    return _cloud_client is not None
+    return llm.is_cloud()
 
 
 def split_project(project_desc):
@@ -43,18 +39,8 @@ def split_project(project_desc):
 
 只输出 JSON 数组，不要其他任何文字。
 """
-    if _cloud_client:
-        # 已配置云端 LLM → 使用云端
-        resp = _cloud_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return resp.choices[0].message.content
-    else:
-        # 默认 → 本地 gemma4
-        resp = ollama.chat(model="gemma4:26b",
-                           messages=[{"role": "user", "content": prompt}])
-        return resp.message.content
+    resp = llm.chat([{"role": "user", "content": prompt}])
+    return resp.content
 
 
 if __name__ == "__main__":

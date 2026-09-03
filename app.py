@@ -16,6 +16,7 @@ import chat
 import company
 import graphrag
 import knowledge
+import llm
 import memory
 import sms
 import payment
@@ -38,7 +39,7 @@ import os
 os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-# 启动时确保表存在 + 加载知识库
+# 启动时确保表存在 + 加载知识库 + 从环境变量加载云端 LLM key
 db.init_db()
 af.init_agent_db()
 auth.init_users()
@@ -46,6 +47,7 @@ company.init_company_db()
 chat.init_chat_db()
 payment.init_payment_db()
 knowledge.load_knowledge()
+llm.load_cloud_from_env()
 
 
 # ---- 请求体模型（前端发来的 JSON 长这样）----
@@ -210,10 +212,17 @@ def agent_chat(body: AgentChatIn):
 
 
 @app.post("/api/config/llm")
-def config_llm(api_key: str = Form(...)):
-    """用户提交 DeepSeek API key，切换到云端模式"""
-    set_cloud_key(api_key)
-    return {"ok": True, "msg": "已切换到 DeepSeek 云端", "mode": "cloud"}
+def config_llm(api_key: str = Form("")):
+    """用户提交 DeepSeek API key，切换到云端模式并持久化（重启仍生效）"""
+    is_cloud_now = llm.persist_cloud_key(api_key)
+    return {"ok": True, "msg": "已切换到 DeepSeek 云端" if is_cloud_now else "已回退本地模式",
+            "mode": "cloud" if is_cloud_now else "local"}
+
+
+@app.get("/api/config/llm")
+def config_llm_status():
+    """当前 LLM 模式"""
+    return {"mode": "cloud" if is_cloud() else "local"}
 
 
 @app.post("/api/config/graphrag")

@@ -18,10 +18,18 @@ _KNOWLEDGE_FILE = "knowledge_store.json"
 # 简单停用词（BM25 分词时过滤，减少噪声）
 STOPWORDS = {"是", "的", "了", "吗", "呢", "啊", "什么", "一个", "这个", "那个", "多少", "怎么"}
 
-_knowledge = []       # [(文本, 向量), ...]
+_knowledge = []       # [(文本, 向量|None), ...]
 _tokenized = []       # 每个片段的词列表（BM25 用）
 _df = {}              # 词 -> 出现几篇（IDF 用）
 _avg_len = 1          # 平均长度
+
+
+def _embed(text):
+    """本地 bge-m3 向量化；不可用（云端部署无 Ollama）时返回 None，检索退化为 BM25。"""
+    try:
+        return np.array(ollama.embed(model=EMBED_MODEL, input=text).embeddings[0])
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _prepare_bm25():
@@ -64,8 +72,8 @@ def build_knowledge(texts):
     global _knowledge
     _knowledge = []
     for text in texts:
-        vec = ollama.embed(model=EMBED_MODEL, input=text).embeddings[0]
-        _knowledge.append((text, vec))
+        vec = _embed(text)
+        _knowledge.append((text, vec.tolist() if vec is not None else None))
     _prepare_bm25()
     with open(_KNOWLEDGE_FILE, "w", encoding="utf-8") as f:
         json.dump([(t, v) for t, v in _knowledge], f)
@@ -78,29 +86,31 @@ def load_knowledge():
         with open(_KNOWLEDGE_FILE, encoding="utf-8") as f:
             data = json.load(f)
         global _knowledge
-        _knowledge = [(t, np.array(v)) for t, v in data]
+        _knowledge = [(t, np.array(v) if v is not None else None) for t, v in data]
         _prepare_bm25()
         return len(_knowledge)
     return 0
 
 
 def search(question, top_k=3):
-    """混合检索：向量分 + BM25 分，各自归一化后融合"""
+    """混合检索：向量分 + BM25 分；向量不可用时退化为纯 BM25。"""
     if not _knowledge:
         return []
 
-    # 向量分
-    qv = ollama.embed(model=EMBED_MODEL, input=question).embeddings[0]
-    Q = np.array(qv)
-    v_arr = np.array([(Q @ np.array(v)) / (np.linalg.norm(Q) * np.linalg.norm(v) + 1e-10)
-                      for _, v in _knowledge])
-    # BM25 分
     b_arr = np.array(_bm25_scores(question))
 
-    # 归一化 + 融合
     def norm(x):
         return (x - x.min()) / (x.max() - x.min() + 1e-10)
-    fused = 0.5 * norm(v_arr) + 0.5 * norm(b_arr)
+
+    # 向量分（仅当全部片段都有向量且本次查询能向量化时）
+    fused = norm(b_arr)
+    if all(v is not None for _, v in _knowledge):
+        qv = _embed(question)
+        if qv is not None:
+            Q = np.array(qv)
+            v_arr = np.array([(Q @ np.array(v)) / (np.linalg.norm(Q) * np.linalg.norm(v) + 1e-10)
+                              for _, v in _knowledge])
+            fused = 0.5 * norm(v_arr) + 0.5 * norm(b_arr)
 
     top = np.argsort(fused)[::-1][:top_k]
     return [(_knowledge[i][0], float(fused[i])) for i in top]
