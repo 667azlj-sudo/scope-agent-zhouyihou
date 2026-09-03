@@ -2,7 +2,7 @@
   <div class="dash">
     <section class="hello">
       <div class="hello-name">你好，{{ user.name }}</div>
-      <div class="hello-sub">这里是你的工作台，待办和团队进度都在这里</div>
+      <div class="hello-sub">待办和团队进度都在这里</div>
     </section>
 
     <section v-if="company" class="company-card">
