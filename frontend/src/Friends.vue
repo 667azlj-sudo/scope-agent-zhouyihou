@@ -51,7 +51,7 @@
           <div v-for="f in friends" :key="f.id" class="row">
             <div class="row-info">
               <span class="avatar">{{ avatarOf(f.name) }}</span>
-              <span class="name">{{ f.name }}</span>
+              <span class="name">{{ f.name }}{{ f.position ? " · " + f.position : "" }}</span>
               <el-tag :type="f.role === 'manager' ? 'danger' : 'info'" size="small" effect="plain">
                 {{ roleOf(f.role) }}
               </el-tag>

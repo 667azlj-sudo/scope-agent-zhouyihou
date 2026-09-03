@@ -965,10 +965,12 @@ def get_pending_submissions():
     rows = conn.execute(
         "SELECT s.id AS sid, s.content, s.status, s.price, s.images, "
         "       t.title AS task_title, t.difficulty, "
-        "       a.name AS agent_name, a.user_id AS submitter_user_id "
+        "       a.name AS agent_name, a.user_id AS submitter_user_id, "
+        "       u.name AS submitter_name, u.position AS submitter_position "
         "FROM submissions s "
         "JOIN agent_tasks t ON t.id = s.task_id "
         "JOIN agents a ON a.id = s.agent_id "
+        "LEFT JOIN users u ON u.id = a.user_id "
         "WHERE s.status='pending' ORDER BY s.id DESC"
     ).fetchall()
     conn.close()

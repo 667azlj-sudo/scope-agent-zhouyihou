@@ -32,8 +32,8 @@
           <span class="title">{{ t.title }}</span>
         </div>
         <div class="distribute">
-          <el-select v-model="distributeTarget[t.id]" placeholder="选员工 Agent" size="small" style="width: 160px">
-            <el-option v-for="a in employeeAgents" :key="a.id" :label="a.user_name || a.name" :value="a.id" />
+          <el-select v-model="distributeTarget[t.id]" placeholder="选员工 Agent" size="small" style="width: 200px">
+            <el-option v-for="a in employeeAgents" :key="a.id" :label="(a.user_name || a.name) + (a.position ? ' · ' + a.position : '')" :value="a.id" />
           </el-select>
           <el-button size="small" type="primary" @click="distribute(t)">分发</el-button>
         </div>
@@ -75,8 +75,8 @@
           <span class="title">{{ t.title }}</span>
         </div>
         <div class="hall">
-          <el-select v-model="hallCandidates[t.id]" multiple collapse-tags placeholder="选候选人" size="small" style="min-width: 160px">
-            <el-option v-for="m in companyMembers" :key="m.id" :label="m.name" :value="m.id" />
+          <el-select v-model="hallCandidates[t.id]" multiple collapse-tags placeholder="选候选人" size="small" style="min-width: 200px">
+            <el-option v-for="m in companyMembers" :key="m.id" :label="m.name + (m.position ? ' · ' + m.position : '')" :value="m.id" />
           </el-select>
           <el-button size="small" type="primary" @click="publishHall(t)">发布大厅</el-button>
         </div>

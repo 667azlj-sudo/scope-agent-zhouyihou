@@ -12,7 +12,7 @@
         <div v-for="s in submissions" :key="s.sid" class="sub-item">
           <div class="sub-head">
             <span class="sub-task">{{ s.task_title }}</span>
-            <span class="sub-from">{{ s.agent_name }}</span>
+            <span class="sub-from">{{ s.submitter_name || s.agent_name }}{{ s.submitter_position ? " · " + s.submitter_position : "" }}</span>
           </div>
           <p class="sub-content">{{ s.content }}</p>
           <div v-if="s.images && s.images.length" class="sub-imgs">

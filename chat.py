@@ -252,7 +252,7 @@ def get_friends(user_id):
     """查某人的好友列表"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT u.id, u.name, u.role FROM friendships f JOIN users u "
+        "SELECT u.id, u.name, u.role, u.position FROM friendships f JOIN users u "
         "ON u.id = CASE WHEN f.user_id=? THEN f.friend_id ELSE f.user_id END "
         "WHERE (f.user_id=? OR f.friend_id=?) AND f.status='approved'",
         (user_id, user_id, user_id)).fetchall()
