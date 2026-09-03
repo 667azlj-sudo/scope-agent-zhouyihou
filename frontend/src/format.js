@@ -21,6 +21,20 @@ export function statusLabel(s) {
   return taskStatus[s] || s || "—"
 }
 
+// 权责审核流水线阶段
+export const reviewStage = {
+  submitted: "待员工 Agent 检查",
+  agent_checked: "待经理 Agent 跑测试",
+  manager_tested: "待经理核验",
+  manager_verified: "待技术员验证",
+  verified: "已通过",
+  rejected: "已打回",
+}
+
+export function stageLabel(s) {
+  return reviewStage[s] || s || "—"
+}
+
 export function roleLabel(r) {
   return r === "manager" ? "负责人" : r === "employee" ? "员工" : "成员"
 }

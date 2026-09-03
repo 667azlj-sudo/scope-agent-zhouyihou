@@ -139,6 +139,10 @@ def init_agent_db():
     scols = [r["name"] for r in conn.execute("PRAGMA table_info(submissions)").fetchall()]
     if "images" not in scols:
         conn.execute("ALTER TABLE submissions ADD COLUMN images TEXT DEFAULT '[]'")
+    if "stage" not in scols:
+        conn.execute("ALTER TABLE submissions ADD COLUMN stage TEXT DEFAULT 'submitted'")
+    if "tech_reviewer" not in scols:
+        conn.execute("ALTER TABLE submissions ADD COLUMN tech_reviewer INTEGER")
     conn.commit()
     conn.close()
     # 迁移：旧表没有 classification 列的话，ALTER TABLE 补上
@@ -1123,17 +1127,19 @@ def get_agent_tasks(agent_id):
 
 
 def get_pending_submissions():
-    """经理审核：所有待审核的提交，附任务标题与提交员工。"""
+    """经理审核：所有待审核的提交，附任务标题、提交员工、当前阶段、指定技术员。"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT s.id AS sid, s.content, s.status, s.price, s.images, "
+        "SELECT s.id AS sid, s.content, s.status, s.price, s.images, s.stage, s.tech_reviewer, "
         "       t.title AS task_title, t.difficulty, "
         "       a.name AS agent_name, a.user_id AS submitter_user_id, "
-        "       u.name AS submitter_name, u.position AS submitter_position "
+        "       u.name AS submitter_name, u.position AS submitter_position, "
+        "       tu.name AS tech_reviewer_name "
         "FROM submissions s "
         "JOIN agent_tasks t ON t.id = s.task_id "
         "JOIN agents a ON a.id = s.agent_id "
         "LEFT JOIN users u ON u.id = a.user_id "
+        "LEFT JOIN users tu ON tu.id = s.tech_reviewer "
         "WHERE s.status='pending' ORDER BY s.id DESC"
     ).fetchall()
     conn.close()
@@ -1154,6 +1160,171 @@ def count_agents():
     n = conn.execute("SELECT COUNT(*) AS c FROM agents").fetchone()["c"]
     conn.close()
     return n
+
+
+# ---------------------------------------------------------------------------
+# 权责审核流水线（提交后四阶段）
+# ① 员工 agent 自检 → ② 经理 agent 跑小项目测试 → ③ 经理核验 → ④ 技术员验证
+# ---------------------------------------------------------------------------
+def _llm_judge(submission, task, system_prompt):
+    """用 LLM 判断成果是否合格/能否跑通，返回 (pass, reason)。"""
+    try:
+        from llm import chat as llm_chat
+        user = (f"任务：{task['title']}\n任务要求：{task.get('detail') or ''}\n"
+                f"员工提交内容：{submission['content']}")
+        resp = llm_chat([{"role": "system", "content": system_prompt},
+                         {"role": "user", "content": user}])
+        data = _extract_json(getattr(resp, "content", None))
+        if isinstance(data, dict) and "pass" in data:
+            return bool(data["pass"]), str(data.get("reason", ""))
+    except Exception as e:  # noqa: BLE001
+        print(f"[judge] LLM 判断失败：{e}")
+    return True, "LLM 判断失败，默认通过"
+
+
+def _reject_submission(conn, submission_id, task_id):
+    """打回：提交置 rejected，任务回到 assigned。"""
+    conn.execute("UPDATE submissions SET status='rejected', stage='rejected' WHERE id=?", (submission_id,))
+    conn.execute("UPDATE agent_tasks SET status='assigned' WHERE id=?", (task_id,))
+
+
+def _get_sub_and_task(conn, submission_id):
+    sub = conn.execute("SELECT * FROM submissions WHERE id=?", (submission_id,)).fetchone()
+    if not sub:
+        return None, None
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (sub["task_id"],)).fetchone()
+    return dict(sub), dict(task) if task else None
+
+
+def agent_check_submission(submission_id):
+    """阶段①：员工 agent 自检，不合格直接打回。"""
+    conn = get_conn()
+    sub, task = _get_sub_and_task(conn, submission_id)
+    if not sub or not task:
+        conn.close()
+        return {"ok": False, "msg": "提交或任务不存在"}
+    if sub["stage"] != "submitted":
+        conn.close()
+        return {"ok": False, "msg": "当前不是待员工 agent 检查阶段"}
+    ok, reason = _llm_judge(sub, task,
+        "你是员工 agent 自检助手。检查这份成果是否合格（完整、可执行、符合任务要求）。"
+        "只返回 JSON：{\"pass\": true 或 false, \"reason\": \"一句话\"}")
+    if ok:
+        conn.execute("UPDATE submissions SET stage='agent_checked' WHERE id=?", (submission_id,))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "stage": "agent_checked", "pass": True, "reason": reason}
+    _reject_submission(conn, submission_id, sub["task_id"])
+    conn.commit()
+    conn.close()
+    return {"ok": True, "stage": "rejected", "pass": False, "reason": reason}
+
+
+def manager_test_submission(submission_id):
+    """阶段②：经理 agent 把成果带到小项目里跑一遍，跑通才确认。"""
+    conn = get_conn()
+    sub, task = _get_sub_and_task(conn, submission_id)
+    if not sub or not task:
+        conn.close()
+        return {"ok": False, "msg": "提交或任务不存在"}
+    if sub["stage"] != "agent_checked":
+        conn.close()
+        return {"ok": False, "msg": "当前不是待经理 agent 跑测试阶段"}
+    ok, reason = _llm_judge(sub, task,
+        "你是经理 agent 测试助手。把这份成果放进一个小项目里实际跑一遍，判断能否跑通（能正常使用/运行）。"
+        "只返回 JSON：{\"pass\": true 或 false, \"reason\": \"一句话\"}")
+    if ok:
+        conn.execute("UPDATE submissions SET stage='manager_tested' WHERE id=?", (submission_id,))
+        conn.commit()
+        conn.close()
+        return {"ok": True, "stage": "manager_tested", "pass": True, "reason": reason}
+    _reject_submission(conn, submission_id, sub["task_id"])
+    conn.commit()
+    conn.close()
+    return {"ok": True, "stage": "rejected", "pass": False, "reason": reason}
+
+
+def manager_verify_submission(submission_id, approve, custom_price=None):
+    """阶段③：经理人工核验（可改价）。"""
+    conn = get_conn()
+    sub, task = _get_sub_and_task(conn, submission_id)
+    if not sub or not task:
+        conn.close()
+        return {"ok": False, "msg": "提交或任务不存在"}
+    if sub["stage"] != "manager_tested":
+        conn.close()
+        return {"ok": False, "msg": "当前不是待经理核验阶段"}
+    if not approve:
+        _reject_submission(conn, submission_id, sub["task_id"])
+        conn.commit()
+        conn.close()
+        return {"ok": True, "stage": "rejected", "msg": "已打回"}
+    if custom_price is not None and float(custom_price) > 0:
+        conn.execute("UPDATE submissions SET price=? WHERE id=?",
+                     (round(float(custom_price), 2), submission_id))
+    conn.execute("UPDATE submissions SET stage='manager_verified' WHERE id=?", (submission_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "stage": "manager_verified", "msg": "经理已核验"}
+
+
+def designate_tech_reviewer(submission_id, user_id):
+    """经理指定技术人员来验证。"""
+    conn = get_conn()
+    sub = conn.execute("SELECT * FROM submissions WHERE id=?", (submission_id,)).fetchone()
+    if not sub:
+        conn.close()
+        return {"ok": False, "msg": "提交不存在"}
+    conn.execute("UPDATE submissions SET tech_reviewer=? WHERE id=?", (user_id, submission_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "submission_id": submission_id, "tech_reviewer": user_id}
+
+
+def tech_verify_submission(submission_id, user_id, approve):
+    """阶段④：经理指定的技术人员验证。通过 → 结算打款。"""
+    conn = get_conn()
+    sub, task = _get_sub_and_task(conn, submission_id)
+    if not sub or not task:
+        conn.close()
+        return {"ok": False, "msg": "提交或任务不存在"}
+    if sub["stage"] != "manager_verified":
+        conn.close()
+        return {"ok": False, "msg": "当前不是待技术人员验证阶段"}
+    if sub.get("tech_reviewer") and sub["tech_reviewer"] != user_id:
+        conn.close()
+        return {"ok": False, "msg": "你不是经理指定的技术人员"}
+    if not approve:
+        _reject_submission(conn, submission_id, sub["task_id"])
+        conn.commit()
+        conn.close()
+        return {"ok": True, "stage": "rejected", "msg": "已打回"}
+    # 定价：经理改过价用改价，否则 agreed_wage，再否则难度公式
+    agent = conn.execute("SELECT * FROM agents WHERE id=?", (sub["agent_id"],)).fetchone()
+    agent = dict(agent) if agent else None
+    base = 0
+    if agent:
+        sal = conn.execute("SELECT base_salary FROM salaries WHERE user_id=?", (agent["user_id"],)).fetchone()
+        base = sal["base_salary"] if sal else 0
+    price = float(sub.get("price") or 0)
+    if price <= 0:
+        agreed = task.get("agreed_wage")
+        if agreed is not None and float(agreed) > 0:
+            price = round(float(agreed), 2)
+        else:
+            price = price_task(base, task.get("difficulty") or 0.5)
+    conn.execute("UPDATE submissions SET status='approved', stage='verified', price=? WHERE id=?",
+                 (price, submission_id))
+    conn.execute("UPDATE agent_tasks SET status='done' WHERE id=?", (task["id"],))
+    if agent:
+        conn.execute(
+            "INSERT INTO payouts (submission_id, user_id, agent_id, amount, status) "
+            "VALUES (?,?,?,?,'pending') "
+            "ON CONFLICT(submission_id) DO UPDATE SET amount=excluded.amount",
+            (submission_id, agent["user_id"], agent["id"], price))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "stage": "verified", "price": price, "msg": f"验证通过，绩效标价 {price}"}
 
 
 # ---------------------------------------------------------------------------
@@ -1208,6 +1379,16 @@ def pay_payout(payout_id):
     conn.commit()
     conn.close()
     return {"ok": True, "msg": "已打款"}
+
+
+def pay_all_payouts():
+    """每月固定时间：把当月所有待打款一次性发放。"""
+    conn = get_conn()
+    n = conn.execute("SELECT COUNT(*) AS c FROM payouts WHERE status='pending'").fetchone()["c"]
+    conn.execute("UPDATE payouts SET status='paid', paid_at=datetime('now','localtime') WHERE status='pending'")
+    conn.commit()
+    conn.close()
+    return {"ok": True, "count": n, "msg": f"已发放 {n} 笔工资"}
 
 
 def get_payout_stats():

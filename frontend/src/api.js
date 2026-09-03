@@ -110,6 +110,18 @@ export function uploadSubmissionImage(file) {
 export const reviewSubmission = (sid, approve, exempt, customPrice) => api(`/api/submissions/${sid}/review`, "POST", { approve, exempt, custom_price: customPrice })
 export const setSalary = (uid, baseSalary, exempt) => api(`/api/salary/${uid}/set`, "POST", { base_salary: baseSalary, exempt })
 
+// 权责审核流水线
+export const agentCheck = (sid) => api(`/api/submissions/${sid}/agent-check`, "POST", {})
+export const managerTest = (sid) => api(`/api/submissions/${sid}/manager-test`, "POST", {})
+export const managerVerify = (sid, approve, customPrice) => api(`/api/submissions/${sid}/manager-verify`, "POST", { approve, custom_price: customPrice })
+export const designateTech = (sid, userId) => api(`/api/submissions/${sid}/designate-tech`, "POST", { user_id: userId })
+export const techVerify = (sid, userId, approve) => api(`/api/submissions/${sid}/tech-verify`, "POST", { user_id: userId, approve })
+
+// 工资发放方式
+export const getPayMode = (cid) => api(`/api/company/${cid}/pay-mode`)
+export const setPayMode = (cid, payMode) => api(`/api/company/${cid}/pay-mode`, "POST", { pay_mode: payMode })
+export const payAllPayouts = () => api("/api/payouts/pay-all", "POST", {})
+
 // 查询接口（员工端 + 经理端）
 export const getAgentByUser = (uid) => api(`/api/agents/user/${uid}`)
 export const getMyTasks = (agentId) => api(`/api/tasks/agent/${agentId}`)

@@ -32,9 +32,15 @@ def init_company_db():
         name TEXT NOT NULL UNIQUE,
         invite_code TEXT NOT NULL UNIQUE,
         manager_id INTEGER,
+        pay_mode TEXT DEFAULT 'on_completion',
         created_at TEXT DEFAULT (datetime('now','localtime'))
     );
     """)
+    conn.commit()
+    # 迁移：老表补 pay_mode 列
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(companies)").fetchall()]
+    if "pay_mode" not in cols:
+        conn.execute("ALTER TABLE companies ADD COLUMN pay_mode TEXT DEFAULT 'on_completion'")
     conn.commit()
     conn.close()
 
@@ -96,3 +102,22 @@ def get_company_members(company_id):
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_pay_mode(company_id):
+    """查公司工资发放方式：monthly=每月固定时间发 / on_completion=项目完成后发。"""
+    conn = get_conn()
+    row = conn.execute("SELECT pay_mode FROM companies WHERE id=?", (company_id,)).fetchone()
+    conn.close()
+    return dict(row)["pay_mode"] if row else "on_completion"
+
+
+def set_pay_mode(company_id, pay_mode):
+    """设置公司工资发放方式。"""
+    if pay_mode not in ("monthly", "on_completion"):
+        return {"ok": False, "msg": "pay_mode 只能是 monthly 或 on_completion"}
+    conn = get_conn()
+    conn.execute("UPDATE companies SET pay_mode=? WHERE id=?", (pay_mode, company_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "pay_mode": pay_mode}

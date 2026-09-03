@@ -845,6 +845,72 @@ def review_submission(sid: int, body: ReviewSubmissionIn):
     return af.review_submission(sid, body.approve, body.exempt, body.custom_price)
 
 
+# ---- 权责审核流水线（四阶段）----
+class DesignateTechIn(BaseModel):
+    user_id: int
+
+
+class TechVerifyIn(BaseModel):
+    user_id: int
+    approve: bool
+
+
+class ManagerVerifyIn(BaseModel):
+    approve: bool
+    custom_price: float = None
+
+
+@app.post("/api/submissions/{sid}/agent-check")
+def agent_check(sid: int):
+    """阶段①：员工 agent 自检"""
+    return af.agent_check_submission(sid)
+
+
+@app.post("/api/submissions/{sid}/manager-test")
+def manager_test(sid: int):
+    """阶段②：经理 agent 跑小项目测试"""
+    return af.manager_test_submission(sid)
+
+
+@app.post("/api/submissions/{sid}/manager-verify")
+def manager_verify(sid: int, body: ManagerVerifyIn):
+    """阶段③：经理核验（可改价）"""
+    return af.manager_verify_submission(sid, body.approve, body.custom_price)
+
+
+@app.post("/api/submissions/{sid}/designate-tech")
+def designate_tech(sid: int, body: DesignateTechIn):
+    """经理指定技术人员"""
+    return af.designate_tech_reviewer(sid, body.user_id)
+
+
+@app.post("/api/submissions/{sid}/tech-verify")
+def tech_verify(sid: int, body: TechVerifyIn):
+    """阶段④：技术人员验证"""
+    return af.tech_verify_submission(sid, body.user_id, body.approve)
+
+
+# ---- 工资发放方式 ----
+class PayModeIn(BaseModel):
+    pay_mode: str
+
+
+@app.get("/api/company/{cid}/pay-mode")
+def get_pay_mode(cid: int):
+    return {"pay_mode": company.get_pay_mode(cid)}
+
+
+@app.post("/api/company/{cid}/pay-mode")
+def set_pay_mode(cid: int, body: PayModeIn):
+    return company.set_pay_mode(cid, body.pay_mode)
+
+
+@app.post("/api/payouts/pay-all")
+def pay_all_payouts():
+    """每月固定时间：一次性发放所有待打款工资"""
+    return af.pay_all_payouts()
+
+
 @app.post("/api/salary/{uid}/set")
 def set_salary(uid: int, body: SetSalaryIn):
     """更新员工工资与豁免标记"""
