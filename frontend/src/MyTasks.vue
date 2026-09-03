@@ -59,7 +59,16 @@
           <div v-if="t.status === 'rejected'" class="feedback bad">负责人已打回，请修改后重新提交</div>
           <div class="submit">
             <textarea v-model="drafts[t.id]" rows="2" placeholder="写下你的成果，提交给负责人审核…"></textarea>
-            <button class="submit-btn" :disabled="!drafts[t.id]" @click="submit(t)">提交成果</button>
+            <div v-if="images[t.id] && images[t.id].length" class="imgs">
+              <div v-for="(u, i) in images[t.id]" :key="u" class="img-item">
+                <img :src="u" />
+                <span class="img-del" @click="removeImg(t.id, i)">×</span>
+              </div>
+            </div>
+            <div class="submit-row">
+              <button class="photo-btn" @click="pickImage(t)">📷 传照片证明</button>
+              <button class="submit-btn" :disabled="!drafts[t.id]" @click="submit(t)">提交成果</button>
+            </div>
           </div>
         </template>
 
@@ -74,19 +83,22 @@
 
       <p v-if="!tasks.length" class="empty-list">暂时没有派给你的任务</p>
     </template>
+
+    <input ref="imgInput" type="file" accept="image/*" multiple hidden @change="onPickImage" />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage } from "./api.js"
 import { statusLabel, difficultyLabel, money } from "./format.js"
 import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
 const agent = ref(null), tasks = ref([]), salary = ref({ base_salary: 0, exempt: 0 })
-const drafts = reactive({}), estimating = reactive({})
+const drafts = reactive({}), estimating = reactive({}), images = reactive({})
 const records = ref(""), recordsOpen = ref([]), savingRecords = ref(false)
+const imgInput = ref(null), currentUploadTaskId = ref(null)
 
 const totalEarned = computed(() =>
   tasks.value
@@ -133,13 +145,39 @@ async function submit(t) {
   const content = (drafts[t.id] || "").trim()
   if (!content) { ElMessage.warning("请先填写成果内容"); return }
   try {
-    await submitWork(t.id, agent.value.id, content)
+    await submitWork(t.id, agent.value.id, content, images[t.id] || [])
     ElMessage.success("已提交，等待负责人审核")
     drafts[t.id] = ""
+    images[t.id] = []
     await load()
   } catch (e) {
     ElMessage.error("提交失败：" + (e.message || "请稍后重试"))
   }
+}
+
+function pickImage(t) {
+  currentUploadTaskId.value = t.id
+  if (imgInput.value) imgInput.value.click()
+}
+
+async function onPickImage(e) {
+  const files = Array.from(e.target.files || [])
+  if (!files.length || !currentUploadTaskId.value) { e.target.value = ""; return }
+  const tid = currentUploadTaskId.value
+  if (!images[tid]) images[tid] = []
+  for (const f of files) {
+    try {
+      const r = await uploadSubmissionImage(f)
+      if (r.url) images[tid].push(r.url)
+    } catch (err) {
+      ElMessage.error("照片上传失败：" + (err.message || "请重试"))
+    }
+  }
+  e.target.value = ""
+}
+
+function removeImg(tid, i) {
+  if (images[tid]) images[tid].splice(i, 1)
 }
 
 onMounted(load)
@@ -177,8 +215,15 @@ onMounted(load)
 
 .submit { margin-top: 12px; }
 .submit textarea { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-family: inherit; font-size: 13px; resize: none; }
-.submit-btn { margin-top: 8px; width: 100%; background: var(--brand); color: #fff; border: none; border-radius: 10px; padding: 10px; cursor: pointer; }
+.submit-btn { width: 100%; background: var(--brand); color: #fff; border: none; border-radius: 10px; padding: 10px; cursor: pointer; }
 .submit-btn:disabled { background: #c7d4f5; cursor: not-allowed; }
+.submit-row { display: flex; gap: 8px; margin-top: 8px; }
+.submit-row .submit-btn { width: auto; flex: 1; margin-top: 0; }
+.photo-btn { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; color: var(--ink); }
+.imgs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.img-item { position: relative; }
+.img-item img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
+.img-del { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; background: rgba(0,0,0,.6); color: #fff; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; cursor: pointer; }
 
 .feedback { margin-top: 10px; font-size: 13px; padding: 8px 12px; border-radius: 8px; }
 .feedback.ok { background: #e9f7ef; color: #2e9e5b; }

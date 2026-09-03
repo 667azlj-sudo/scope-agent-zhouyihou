@@ -15,6 +15,9 @@
             <span class="sub-from">{{ s.agent_name }}</span>
           </div>
           <p class="sub-content">{{ s.content }}</p>
+          <div v-if="s.images && s.images.length" class="sub-imgs">
+            <img v-for="u in s.images" :key="u" :src="u" class="sub-img" />
+          </div>
           <div class="sub-actions">
             <span class="sub-exempt">
               <el-checkbox v-model="exemptMap[s.sid]">豁免绩效</el-checkbox>
@@ -181,6 +184,8 @@ onMounted(load)
 .payout-amount.paid { color: #2e9e5b; }
 .payout-meta { display: flex; justify-content: space-between; margin: 6px 0; font-size: 12px; color: var(--muted); }
 .sub-content { margin: 8px 0; font-size: 13px; color: #4b5158; white-space: pre-wrap; }
+.sub-imgs { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.sub-img { width: 72px; height: 72px; object-fit: cover; border-radius: 8px; border: 1px solid var(--line); }
 .sub-actions { display: flex; justify-content: space-between; align-items: center; }
 .sub-exempt { font-size: 13px; color: var(--muted); }
 .sub-btns { display: flex; gap: 8px; }

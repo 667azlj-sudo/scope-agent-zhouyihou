@@ -36,10 +36,10 @@
 
 <script setup>
 import { ref, onMounted, nextTick } from "vue"
-import { sendMessage, getMessages, withdrawMessage, sendImage } from "./api.js"
+import { sendMessage, getMessages, withdrawMessage, sendImage, markChatRead } from "./api.js"
 
 const props = defineProps(["token", "userId", "cid"])
-const emit = defineEmits(["back"])
+const emit = defineEmits(["back", "read"])
 const messages = ref([]), content = ref(""), chatId = ref(null), msgsRef = ref(null), fileInput = ref(null)
 
 onMounted(async () => {
@@ -52,6 +52,8 @@ onMounted(async () => {
 async function load() {
   const r = await getMessages(chatId.value)
   messages.value = r.messages || []
+  // 打开即已读，消除红点
+  try { await markChatRead(chatId.value, props.token); emit("read") } catch (e) { /* 忽略 */ }
   await nextTick()
   if (msgsRef.value) msgsRef.value.scrollTop = msgsRef.value.scrollHeight
 }

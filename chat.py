@@ -54,6 +54,12 @@ def init_chat_db():
         friend_id INTEGER NOT NULL,
         status TEXT DEFAULT 'approved'
     );
+    CREATE TABLE IF NOT EXISTS chat_reads (
+        chat_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        last_read_id INTEGER DEFAULT 0,
+        PRIMARY KEY (chat_id, user_id)
+    );
     """)
     # 兼容旧表：补 messages 新字段
     mcols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
@@ -199,15 +205,31 @@ def get_friends(user_id):
     return [dict(r) for r in rows]
 
 
+def mark_read(chat_id, user_id):
+    """标记某会话对某用户已读（把 last_read_id 设为最新一条消息 id）"""
+    conn = get_conn()
+    last = conn.execute(
+        "SELECT COALESCE(MAX(id),0) AS m FROM messages WHERE chat_id=?", (chat_id,)).fetchone()["m"]
+    conn.execute(
+        "INSERT INTO chat_reads (chat_id, user_id, last_read_id) VALUES (?,?,?) "
+        "ON CONFLICT(chat_id, user_id) DO UPDATE SET last_read_id=excluded.last_read_id",
+        (chat_id, user_id, last))
+    conn.commit()
+    conn.close()
+
+
 def get_user_chats(user_id):
-    """当前用户的会话列表（含最新消息、未读计数）"""
+    """当前用户的会话列表（含最新消息、真正的未读计数）"""
     conn = get_conn()
     rows = conn.execute(
         "SELECT c.id, c.type, c.name, "
         "(SELECT content FROM messages m WHERE m.chat_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_msg, "
-        "(SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id AND m.status='normal') AS unread "
+        "(SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id AND m.status='normal' "
+        " AND m.sender_id!=? AND m.id > COALESCE("
+        "   (SELECT last_read_id FROM chat_reads r WHERE r.chat_id=c.id AND r.user_id=?), 0)"
+        ") AS unread "
         "FROM chats c JOIN chat_members cm ON c.id=cm.chat_id "
         "WHERE cm.user_id=? ORDER BY c.id DESC",
-        (user_id,)).fetchall()
+        (user_id, user_id, user_id)).fetchall()
     conn.close()
     return [dict(r) for r in rows]

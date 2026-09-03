@@ -107,6 +107,10 @@ def init_agent_db():
                      ("estimate_reason", "TEXT"), ("agreed_wage", "REAL")]:
         if col not in cols:
             conn.execute(f"ALTER TABLE agent_tasks ADD COLUMN {col} {typ}")
+    # 迁移：submissions 增加 images 列（照片凭证）
+    scols = [r["name"] for r in conn.execute("PRAGMA table_info(submissions)").fetchall()]
+    if "images" not in scols:
+        conn.execute("ALTER TABLE submissions ADD COLUMN images TEXT DEFAULT '[]'")
     conn.commit()
     conn.close()
     # 迁移：旧表没有 classification 列的话，ALTER TABLE 补上
@@ -485,23 +489,24 @@ def get_task(agent_id):
     return [dict(r) for r in rows]
 
 
-def submit_work(task_id, agent_id, content):
-    """员工提交成果：写入 submissions，任务状态 -> submitted。返回提交 dict"""
+def submit_work(task_id, agent_id, content, images=None):
+    """员工提交成果：写入 submissions（可附照片凭证），任务状态 -> submitted。"""
     conn = get_conn()
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
     if not task:
         conn.close()
         return {"ok": False, "msg": "任务不存在"}
+    imgs = json.dumps(list(images or []), ensure_ascii=False)
     cur = conn.execute(
-        "INSERT INTO submissions (task_id, agent_id, content, status) VALUES (?,?,?,?)",
-        (task_id, agent_id, content, "pending"),
+        "INSERT INTO submissions (task_id, agent_id, content, status, images) VALUES (?,?,?,?,?)",
+        (task_id, agent_id, content, "pending", imgs),
     )
     conn.execute("UPDATE agent_tasks SET status='submitted' WHERE id=?", (task_id,))
     conn.commit()
     sid = cur.lastrowid
     conn.close()
     return {"ok": True, "id": sid, "task_id": task_id, "agent_id": agent_id,
-            "content": content, "status": "pending"}
+            "content": content, "status": "pending", "images": list(images or [])}
 
 
 # ---------------------------------------------------------------------------
@@ -620,12 +625,19 @@ def get_agent_tasks(agent_id):
     for t in rows:
         t = dict(t)
         sub = conn.execute(
-            "SELECT status, price FROM submissions WHERE task_id=? AND agent_id=? "
+            "SELECT status, price, images FROM submissions WHERE task_id=? AND agent_id=? "
             "ORDER BY id DESC LIMIT 1",
             (t["id"], agent_id),
         ).fetchone()
         t["submission_status"] = dict(sub)["status"] if sub else None
         t["submission_price"] = dict(sub)["price"] if sub else None
+        if sub:
+            try:
+                t["submission_images"] = json.loads(dict(sub).get("images") or "[]")
+            except Exception:  # noqa: BLE001
+                t["submission_images"] = []
+        else:
+            t["submission_images"] = []
         out.append(t)
     conn.close()
     return out
@@ -635,7 +647,7 @@ def get_pending_submissions():
     """经理审核：所有待审核的提交，附任务标题与提交员工。"""
     conn = get_conn()
     rows = conn.execute(
-        "SELECT s.id AS sid, s.content, s.status, s.price, "
+        "SELECT s.id AS sid, s.content, s.status, s.price, s.images, "
         "       t.title AS task_title, t.difficulty, "
         "       a.name AS agent_name, a.user_id AS submitter_user_id "
         "FROM submissions s "
@@ -644,7 +656,15 @@ def get_pending_submissions():
         "WHERE s.status='pending' ORDER BY s.id DESC"
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["images"] = json.loads(d.get("images") or "[]")
+        except Exception:  # noqa: BLE001
+            d["images"] = []
+        out.append(d)
+    return out
 
 
 def count_agents():

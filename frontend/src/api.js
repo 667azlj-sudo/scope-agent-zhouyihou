@@ -52,7 +52,13 @@ export const reviewEstimate = (taskId, approve) => api(`/api/tasks/${taskId}/rev
 export const getRecords = (uid) => api(`/api/records/${uid}`)
 export const saveRecords = (uid, content) => api(`/api/records/${uid}`, "POST", { content })
 export const getCompany = (cid) => api(`/api/companies/${cid}`)
-export const submitWork = (taskId, agentId, content) => api("/api/submissions/submit", "POST", { task_id: taskId, agent_id: agentId, content })
+export const submitWork = (taskId, agentId, content, images) => api("/api/submissions/submit", "POST", { task_id: taskId, agent_id: agentId, content, images: images || [] })
+export const markChatRead = (cid, token) => api(`/api/chats/${cid}/read`, "POST", { token })
+export function uploadSubmissionImage(file) {
+  const fd = new FormData()
+  fd.append("file", file)
+  return fetch(`http://127.0.0.1:8000/api/submissions/image`, { method: "POST", body: fd }).then(r => r.json())
+}
 export const reviewSubmission = (sid, approve, exempt) => api(`/api/submissions/${sid}/review`, "POST", { approve, exempt })
 export const setSalary = (uid, baseSalary, exempt) => api(`/api/salary/${uid}/set`, "POST", { base_salary: baseSalary, exempt })
 

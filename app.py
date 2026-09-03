@@ -170,6 +170,10 @@ class WithdrawIn(BaseModel):
     token: str
 
 
+class MarkReadIn(BaseModel):
+    token: str
+
+
 @app.post("/api/messages/{mid}/withdraw")
 def withdraw(mid: int, body: WithdrawIn):
     """撤回消息（2分钟内、只能撤回自己的）"""
@@ -184,6 +188,16 @@ def withdraw(mid: int, body: WithdrawIn):
 def get_chat_messages(cid: int):
     """获取会话消息"""
     return {"messages": chat.get_messages(cid)}
+
+
+@app.post("/api/chats/{cid}/read")
+def mark_chat_read(cid: int, body: MarkReadIn):
+    """标记会话已读（消除红点）"""
+    user = auth.get_user_by_token(body.token)
+    if not user:
+        return {"ok": False, "msg": "未登录或 token 无效"}
+    chat.mark_read(cid, user["id"])
+    return {"ok": True, "msg": "已读"}
 
 
 class AgentChatIn(BaseModel):
@@ -469,6 +483,7 @@ class SubmitWorkIn(BaseModel):
     task_id: int
     agent_id: int
     content: str
+    images: list[str] = []   # 照片凭证 URL 列表
 
 
 class ReviewSubmissionIn(BaseModel):
@@ -576,10 +591,23 @@ def save_records(uid: int, body: SaveRecordIn):
     return af.save_user_records(uid, body.content)
 
 
+@app.post("/api/submissions/image")
+async def upload_submission_image(file: UploadFile = File(...)):
+    """员工上传成果凭证照片，返回可访问的 URL"""
+    import uuid
+    os.makedirs("uploads", exist_ok=True)
+    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
+    filename = f"sub_{uuid.uuid4().hex[:12]}{ext}"
+    path = os.path.join("uploads", filename)
+    with open(path, "wb") as f:
+        f.write(await file.read())
+    return {"ok": True, "url": f"/uploads/{filename}"}
+
+
 @app.post("/api/submissions/submit")
 def submit_work(body: SubmitWorkIn):
-    """员工提交成果"""
-    return af.submit_work(body.task_id, body.agent_id, body.content)
+    """员工提交成果（可附照片凭证）"""
+    return af.submit_work(body.task_id, body.agent_id, body.content, body.images)
 
 
 @app.post("/api/submissions/{sid}/review")
