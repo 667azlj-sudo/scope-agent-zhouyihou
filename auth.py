@@ -49,6 +49,10 @@ def init_users():
     if "phone" not in cols:
         conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone)")
+    if "company_id" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN company_id INTEGER")
+    if "position" not in cols:
+        conn.execute("ALTER TABLE users ADD COLUMN position TEXT")
     conn.commit()
     conn.close()
 
@@ -147,16 +151,17 @@ def verify_code(phone, code):
     return True, "验证通过"
 
 
-def register(name, password, role, phone=None):
-    """注册用户（role 必填；phone 可选，注册时需已通过验证码校验）"""
+def register(name, password, role, phone=None, company_id=None, position=None):
+    """注册用户（role 必填；phone 可选；company_id/position 为公司归属与岗位）"""
     if role not in ("user", "employee", "manager"):
         return False, "角色无效，请选择岗位"
     phone = _normalize_phone(phone) if phone else None
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO users (name, role, password_hash, phone) VALUES (?,?,?,?)",
-            (name, role, hash_password(password), phone),
+            "INSERT INTO users (name, role, password_hash, phone, company_id, position) "
+            "VALUES (?,?,?,?,?,?)",
+            (name, role, hash_password(password), phone, company_id, position),
         )
         conn.commit()
         return True, "注册成功"

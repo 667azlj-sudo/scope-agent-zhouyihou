@@ -5,6 +5,20 @@
       <div class="hello-sub">这里是你的工作台，待办和团队进度都在这里</div>
     </section>
 
+    <section v-if="company" class="company-card">
+      <div class="company-left">
+        <div class="company-name">{{ company.company.name }}</div>
+        <div class="company-meta">{{ company.members.length }} 位成员</div>
+      </div>
+      <div class="company-right">
+        <div class="code-label">邀请码</div>
+        <div class="code-row">
+          <span class="code">{{ company.company.invite_code }}</span>
+          <el-button size="small" @click="copyCode">复制</el-button>
+        </div>
+      </div>
+    </section>
+
     <section class="stats">
       <div class="stat" @click="$emit('goto', 'task')">
         <div class="stat-num">{{ stats.pending_classify }}</div>
@@ -55,14 +69,28 @@
 
 <script setup>
 import { ref, onMounted } from "vue"
-import { getDashboardStats } from "./api.js"
+import { getDashboardStats, getCompany } from "./api.js"
+import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
 defineEmits(["goto"])
 const stats = ref({ pending_classify: 0, pending_submissions: 0, team_agents: 0 })
+const company = ref(null)
+
+function copyCode() {
+  if (!company.value) return
+  navigator.clipboard?.writeText(company.value.company.invite_code)
+  ElMessage.success("邀请码已复制")
+}
 
 onMounted(async () => {
   try { stats.value = await getDashboardStats() } catch (e) { /* 忽略 */ }
+  if (props.user.company_id) {
+    try {
+      const r = await getCompany(props.user.company_id)
+      if (r.ok) company.value = r
+    } catch (e) { /* 忽略 */ }
+  }
 })
 </script>
 
@@ -71,6 +99,14 @@ onMounted(async () => {
 .hello { padding: 4px 2px 16px; }
 .hello-name { font-size: 20px; font-weight: 700; }
 .hello-sub { margin-top: 4px; font-size: 13px; color: var(--muted); }
+
+.company-card { display: flex; justify-content: space-between; align-items: center; background: var(--brand-soft); border-radius: 14px; padding: 14px 16px; margin-bottom: 20px; }
+.company-name { font-size: 16px; font-weight: 700; color: var(--brand); }
+.company-meta { margin-top: 4px; font-size: 12px; color: var(--muted); }
+.company-right { text-align: right; }
+.code-label { font-size: 12px; color: var(--muted); }
+.code-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.code { font-family: ui-monospace, Consolas, monospace; font-size: 16px; font-weight: 700; letter-spacing: 1px; }
 
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 24px; }
 .stat { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 16px 8px; text-align: center; cursor: pointer; transition: box-shadow .15s; }

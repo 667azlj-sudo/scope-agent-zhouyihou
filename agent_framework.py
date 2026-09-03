@@ -93,7 +93,20 @@ def init_agent_db():
         created_at TEXT DEFAULT (datetime('now', 'localtime')),
         paid_at TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS user_records (
+        user_id INTEGER PRIMARY KEY,
+        content TEXT DEFAULT '',
+        updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
     """)
+    conn.commit()
+    # 迁移：agent_tasks 增加报价相关列
+    cols = [r["name"] for r in conn.execute("PRAGMA table_info(agent_tasks)").fetchall()]
+    for col, typ in [("estimated_hours", "REAL"), ("estimated_wage", "REAL"),
+                     ("estimate_reason", "TEXT"), ("agreed_wage", "REAL")]:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE agent_tasks ADD COLUMN {col} {typ}")
     conn.commit()
     conn.close()
     # 迁移：旧表没有 classification 列的话，ALTER TABLE 补上
@@ -308,8 +321,38 @@ def add_task(title, detail="", difficulty=0.5, manager_agent_id=None):
             "status": "pending", "manager_agent": manager_agent_id}
 
 
-def assign_task(agent_id, task_id):
-    """把任务派发给某个 agent（status -> assigned），返回结果 dict"""
+def list_agents():
+    """所有 Agent（附用户名/岗位/公司），经理分发任务时选择。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT a.*, u.name AS user_name, u.position, u.company_id "
+        "FROM agents a LEFT JOIN users u ON u.id = a.user_id ORDER BY a.id"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_internal_tasks():
+    """待经理分发的内部任务（status=internal）。"""
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM agent_tasks WHERE status='internal' ORDER BY id DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_estimated_tasks():
+    """待经理审核报价的任务（status=estimated）。"""
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM agent_tasks WHERE status='estimated' ORDER BY id DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def distribute_task(agent_id, task_id):
+    """经理 agent 把任务分发（distributed）给某个员工 agent。
+
+    这一步只是「分发」，任务真正落到员工头上要等员工 agent 报价、经理审核通过后。
+    """
     conn = get_conn()
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
     if not task:
@@ -317,13 +360,118 @@ def assign_task(agent_id, task_id):
         return {"ok": False, "msg": "任务不存在"}
     if task["status"] == "done":
         conn.close()
-        return {"ok": False, "msg": "任务已完成，不能重复派发"}
-    conn.execute("UPDATE agent_tasks SET assignee_agent=?, status='assigned' WHERE id=?",
+        return {"ok": False, "msg": "任务已完成，不能重复分发"}
+    conn.execute("UPDATE agent_tasks SET assignee_agent=?, status='distributed' WHERE id=?",
                  (agent_id, task_id))
     conn.commit()
     conn.close()
     return {"ok": True, "task_id": task_id, "assignee_agent": agent_id,
-            "status": "assigned"}
+            "status": "distributed"}
+
+
+# ---------------------------------------------------------------------------
+# 本地记录（员工个人档案 / 技能 / 历史绩效，agent 报价依据）
+# ---------------------------------------------------------------------------
+def get_user_records(user_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM user_records WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else {"user_id": user_id, "content": ""}
+
+
+def save_user_records(user_id, content):
+    conn = get_conn()
+    conn.execute(
+        "INSERT INTO user_records (user_id, content, updated_at) VALUES (?,?,datetime('now','localtime')) "
+        "ON CONFLICT(user_id) DO UPDATE SET content=excluded.content, "
+        "updated_at=excluded.updated_at",
+        (user_id, content or ""),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "user_id": user_id}
+
+
+# ---------------------------------------------------------------------------
+# 员工 agent 报价 + 经理审核报价
+# ---------------------------------------------------------------------------
+def _estimate_with_llm(task, records_content, base_salary):
+    """让 LLM 结合任务 + 本地记录估算工时与报价工资，返回 (hours, wage, reason)。"""
+    try:
+        from llm import chat as llm_chat
+        system = (
+            "你是一名员工专属 Agent 的报价助手。根据任务要求和员工的本地记录，"
+            "估算完成该任务所需的工时（小时）和合理报价工资（元）。"
+            "只返回 JSON：{\"hours\": 数字, \"wage\": 数字, \"reason\": \"一句话理由\"}，不要输出多余文字。"
+        )
+        user = (
+            f"任务标题：{task['title']}\n任务要求：{task.get('detail') or ''}\n"
+            f"员工本地记录：{records_content or '（暂无）'}"
+        )
+        resp = llm_chat([{"role": "system", "content": system}, {"role": "user", "content": user}])
+        data = _extract_json(getattr(resp, "content", None))
+        if isinstance(data, dict):
+            hours = float(data.get("hours", 0) or 0)
+            wage = float(data.get("wage", 0) or 0)
+            reason = str(data.get("reason", ""))
+            if hours > 0 and wage > 0:
+                return hours, wage, reason
+    except Exception as e:  # noqa: BLE001
+        print(f"[estimate] LLM 报价失败，走兜底公式：{e}")
+    # 兜底：按难度系数定价，工时按难度估一个合理值
+    difficulty = float(task.get("difficulty") or 0.5)
+    hours = round(2 + difficulty * 16, 1)
+    wage = price_task(base_salary, difficulty)
+    return hours, wage, "按基础工资与难度系数估算"
+
+
+def estimate_task(agent_id, task_id):
+    """员工 agent 审核任务并报价：结合本地记录给出工时 + 工资，状态 -> estimated。"""
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    agent = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+    conn.close()
+    if not task or not agent:
+        return {"ok": False, "msg": "任务或 Agent 不存在"}
+    task = dict(task)
+    agent = dict(agent)
+    records = get_user_records(agent["user_id"])
+    salary = get_salary(agent["user_id"])
+    base = float(salary["base_salary"] or 6000)
+    hours, wage, reason = _estimate_with_llm(task, records["content"], base)
+
+    conn = get_conn()
+    conn.execute(
+        "UPDATE agent_tasks SET estimated_hours=?, estimated_wage=?, estimate_reason=?, "
+        "status='estimated' WHERE id=?",
+        (hours, wage, reason, task_id),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "task_id": task_id, "hours": hours, "wage": wage, "reason": reason}
+
+
+def review_estimate(task_id, approve):
+    """经理 agent 审核报价：通过 → assigned 并锁定 agreed_wage；打回 → distributed 重新报价。"""
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    if not task:
+        conn.close()
+        return {"ok": False, "msg": "任务不存在"}
+    task = dict(task)
+    if task["status"] != "estimated":
+        conn.close()
+        return {"ok": False, "msg": "任务当前不在待审核报价状态"}
+    if approve:
+        conn.execute("UPDATE agent_tasks SET status='assigned', agreed_wage=estimated_wage WHERE id=?",
+                     (task_id,))
+        msg = f"报价已通过，任务正式派发，工资 {task['estimated_wage']}"
+    else:
+        conn.execute("UPDATE agent_tasks SET status='distributed' WHERE id=?", (task_id,))
+        msg = "报价已打回，可重新报价"
+    conn.commit()
+    conn.close()
+    return {"ok": True, "task_id": task_id, "msg": msg}
 
 
 def get_task(agent_id):
@@ -414,10 +562,14 @@ def review_submission(submission_id, approve, exempt=0):
         base = dict(salary)["base_salary"] if salary else 0
 
     if approve:
-        difficulty = task.get("difficulty") or 0.5
-        if exempt:
+        # 优先用「报价审核通过后锁定的 agreed_wage」，其次按豁免/难度公式
+        agreed = task.get("agreed_wage")
+        if agreed is not None and float(agreed) > 0:
+            price = round(float(agreed), 2)
+        elif exempt:
             price = round(float(base), 2)
         else:
+            difficulty = task.get("difficulty") or 0.5
             price = price_task(base, difficulty)
         conn.execute("UPDATE submissions SET status='approved', price=? WHERE id=?",
                      (price, submission_id))

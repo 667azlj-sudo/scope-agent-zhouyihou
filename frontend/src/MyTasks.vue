@@ -22,7 +22,16 @@
         </div>
       </section>
 
+      <el-collapse v-model="recordsOpen" class="records">
+        <el-collapse-item title="我的本地记录（Agent 报价依据）" name="rec">
+          <p class="records-hint">写清你的技能、经验、历史产出，Agent 会据此为你报价。</p>
+          <el-input v-model="records" type="textarea" :rows="4" placeholder="例如：5 年后端经验，擅长 Python/FastAPI，日均产出 3 个接口…" />
+          <el-button class="records-save" type="primary" size="small" :loading="savingRecords" @click="saveMyRecords">保存</el-button>
+        </el-collapse-item>
+      </el-collapse>
+
       <div class="list-title">我的任务</div>
+
       <div v-for="t in tasks" :key="t.id" class="task-card">
         <div class="task-head">
           <span class="task-title">{{ t.title }}</span>
@@ -30,25 +39,36 @@
         </div>
         <div class="task-meta">
           <span class="meta">难度 · {{ difficultyLabel(t.difficulty) }}</span>
-          <span class="meta status" :class="t.status">{{ statusLabel(t.status) }}</span>
+          <span class="meta status">{{ statusLabel(t.status) }}</span>
         </div>
         <p v-if="t.detail" class="task-detail">{{ t.detail }}</p>
 
-        <template v-if="isSubmittable(t.status)">
+        <!-- 待报价：员工 agent 审核任务并报价 -->
+        <div v-if="t.status === 'distributed'" class="action">
+          <p class="action-hint">负责人已分发此任务，先让 Agent 结合你的本地记录报价。</p>
+          <el-button type="primary" size="small" :loading="estimating[t.id]" @click="doEstimate(t)">让 Agent 报价</el-button>
+        </div>
+
+        <!-- 报价已提交，等待经理审核 -->
+        <div v-else-if="t.status === 'estimated'" class="feedback warn">
+          已报价：工时 {{ t.estimated_hours }}h · ¥{{ t.estimated_wage }}，等待负责人审核
+        </div>
+
+        <!-- 进行中 / 已打回：提交成果 -->
+        <template v-else-if="t.status === 'assigned' || t.status === 'rejected'">
+          <div v-if="t.status === 'rejected'" class="feedback bad">负责人已打回，请修改后重新提交</div>
           <div class="submit">
             <textarea v-model="drafts[t.id]" rows="2" placeholder="写下你的成果，提交给负责人审核…"></textarea>
             <button class="submit-btn" :disabled="!drafts[t.id]" @click="submit(t)">提交成果</button>
           </div>
         </template>
 
-        <div v-if="t.submission_status === 'approved'" class="feedback ok">
-          已通过，绩效价 {{ money(t.submission_price) }}
-        </div>
-        <div v-else-if="t.submission_status === 'rejected'" class="feedback bad">
-          已打回，请修改后重新提交
-        </div>
-        <div v-else-if="t.submission_status === 'pending'" class="feedback warn">
-          已提交，等待负责人审核
+        <!-- 已提交 -->
+        <div v-else-if="t.status === 'submitted'" class="feedback warn">已提交，等待负责人审核</div>
+
+        <!-- 已完成 -->
+        <div v-else-if="t.status === 'done'" class="feedback ok">
+          已完成，绩效价 {{ money(t.submission_price || t.agreed_wage) }}
         </div>
       </div>
 
@@ -59,29 +79,54 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary, submitWork } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords } from "./api.js"
 import { statusLabel, difficultyLabel, money } from "./format.js"
 import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
 const agent = ref(null), tasks = ref([]), salary = ref({ base_salary: 0, exempt: 0 })
-const drafts = reactive({})
+const drafts = reactive({}), estimating = reactive({})
+const records = ref(""), recordsOpen = ref([]), savingRecords = ref(false)
 
 const totalEarned = computed(() =>
   tasks.value
-    .filter(t => t.submission_status === "approved")
+    .filter(t => t.status === "done")
     .reduce((s, t) => s + (Number(t.submission_price) || 0), 0)
 )
-
-function isSubmittable(s) { return s === "pending" || s === "assigned" || s === "rejected" }
 
 async function load() {
   const a = await getAgentByUser(props.user.id)
   agent.value = a || null
   if (!agent.value) return
-  const [t, s] = [await getMyTasks(agent.value.id), await getSalary(props.user.id)]
+  const [t, s, rec] = [await getMyTasks(agent.value.id), await getSalary(props.user.id), await getRecords(props.user.id)]
   tasks.value = t.tasks || []
   salary.value = s
+  records.value = rec.content || ""
+}
+
+async function saveMyRecords() {
+  savingRecords.value = true
+  try {
+    await saveRecords(props.user.id, records.value)
+    ElMessage.success("本地记录已保存")
+  } catch (e) {
+    ElMessage.error("保存失败：" + (e.message || "请稍后重试"))
+  } finally {
+    savingRecords.value = false
+  }
+}
+
+async function doEstimate(t) {
+  estimating[t.id] = true
+  try {
+    const r = await estimateTask(t.id, agent.value.id)
+    ElMessage.success(`报价完成：工时 ${r.hours}h · ¥${r.wage}`)
+    await load()
+  } catch (e) {
+    ElMessage.error("报价失败：" + (e.message || "请稍后重试"))
+  } finally {
+    estimating[t.id] = false
+  }
 }
 
 async function submit(t) {
@@ -106,11 +151,15 @@ onMounted(load)
 .empty-title { font-size: 16px; font-weight: 600; color: var(--ink); }
 .empty-sub { font-size: 13px; margin-top: 4px; }
 
-.income { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 20px; }
+.income { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
 .income-item { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px 10px; text-align: center; }
 .income-label { font-size: 12px; color: var(--muted); }
 .income-num { margin-top: 6px; font-size: 18px; font-weight: 700; }
 .income-num.accent { color: var(--brand); }
+
+.records { margin-bottom: 16px; background: #fff; border: 1px solid var(--line); border-radius: 14px; }
+.records-hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+.records-save { margin-top: 8px; }
 
 .list-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 .task-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; }
@@ -122,6 +171,9 @@ onMounted(load)
 .task-meta { display: flex; gap: 10px; margin-top: 8px; }
 .meta { font-size: 12px; color: var(--muted); }
 .task-detail { margin: 8px 0 0; font-size: 13px; color: #4b5158; }
+
+.action { margin-top: 12px; }
+.action-hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
 
 .submit { margin-top: 12px; }
 .submit textarea { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 10px; font-family: inherit; font-size: 13px; resize: none; }

@@ -13,6 +13,7 @@ import db
 import auth
 import agent
 import chat
+import company
 import graphrag
 import knowledge
 import memory
@@ -41,6 +42,7 @@ app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 db.init_db()
 af.init_agent_db()
 auth.init_users()
+company.init_company_db()
 chat.init_chat_db()
 payment.init_payment_db()
 knowledge.load_knowledge()
@@ -224,9 +226,12 @@ def config_graphrag(enabled: bool = Form(...)):
 class RegisterIn(BaseModel):
     name: str
     password: str
-    role: str          # 岗位必填，不能默认
-    phone: str = ""    # 手机号（需已通过验证码校验）
-    code: str = ""     # 短信验证码
+    role: str             # 岗位必填，不能默认
+    phone: str = ""       # 手机号（需已通过验证码校验）
+    code: str = ""        # 短信验证码
+    company_name: str = ""  # 经理注册时填公司名
+    invite_code: str = ""   # 员工注册时填公司邀请码
+    position: str = ""      # 公司岗位
 
 
 class LoginIn(BaseModel):
@@ -257,15 +262,55 @@ def send_sms(body: SmsSendIn):
 
 @app.post("/api/register")
 def register(body: RegisterIn):
-    """用户注册：手机号需先通过 /api/sms/send + 验证码校验"""
+    """用户注册：手机号验证码 + 公司归属 + 岗位；注册成功自动建 Agent"""
     from auth import _normalize_phone
     phone = _normalize_phone(body.phone) if body.phone else None
     if phone:
         ok_code, msg_code = auth.verify_code(phone, body.code)
         if not ok_code:
             return {"ok": False, "msg": msg_code}
-    ok, msg = auth.register(body.name, body.password, body.role, phone)
-    return {"ok": ok, "msg": msg}
+
+    # 公司归属处理
+    company_id = None
+    if body.role == "manager":
+        if not body.company_name.strip():
+            return {"ok": False, "msg": "请填写公司名称"}
+        if not body.position.strip():
+            return {"ok": False, "msg": "请填写公司岗位"}
+    elif body.role == "employee":
+        if not body.invite_code.strip():
+            return {"ok": False, "msg": "请填写公司邀请码"}
+        if not body.position.strip():
+            return {"ok": False, "msg": "请填写公司岗位"}
+        c = company.get_company_by_code(body.invite_code)
+        if not c:
+            return {"ok": False, "msg": "邀请码无效"}
+        company_id = c["id"]
+
+    ok, msg = auth.register(body.name, body.password, body.role, phone, company_id, body.position.strip())
+    if not ok:
+        return {"ok": False, "msg": msg}
+
+    user = auth.get_user(body.name) or (auth.get_user_by_phone(phone) if phone else None)
+
+    # 经理：注册后创建公司并回填负责人
+    if body.role == "manager" and user:
+        comp, err = company.create_company(body.company_name.strip(), user["id"])
+        if not comp:
+            return {"ok": False, "msg": err}
+        from auth import get_conn as _ac
+        _c = _ac()
+        _c.execute("UPDATE users SET company_id=? WHERE id=?", (comp["id"], user["id"]))
+        _c.commit()
+        _c.close()
+
+    # 自动为经理/员工建专属 Agent（不替员工干活，只做审核/报价/协作）
+    if user and body.role in ("manager", "employee"):
+        try:
+            af.create_agent(user["id"], body.role, f"{body.name} 的 Agent")
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ok": True, "msg": "注册成功"}
 
 
 @app.post("/api/login")
@@ -274,7 +319,8 @@ def login(body: LoginIn):
     token, result = auth.login(body.account, body.password)
     if token:
         return {"ok": True, "token": token,
-                "user": {"id": result["id"], "name": result["name"], "role": result["role"]}}
+                "user": {"id": result["id"], "name": result["name"], "role": result["role"],
+                         "company_id": result.get("company_id"), "position": result.get("position")}}
     return {"ok": False, "msg": result}
 
 
@@ -397,6 +443,19 @@ class AssignTaskIn(BaseModel):
     agent_id: int
 
 
+class EstimateTaskIn(BaseModel):
+    task_id: int
+    agent_id: int
+
+
+class ReviewEstimateIn(BaseModel):
+    approve: bool
+
+
+class SaveRecordIn(BaseModel):
+    content: str
+
+
 class SubmitWorkIn(BaseModel):
     task_id: int
     agent_id: int
@@ -439,10 +498,73 @@ def classify(tid: int, body: ClassifyTaskIn):
     return af.manager_choose(tid, body.choice)
 
 
-@app.post("/api/tasks/assign")
-def assign_task(body: AssignTaskIn):
-    """把任务派发给某个 agent"""
-    return af.assign_task(body.agent_id, body.task_id)
+@app.post("/api/tasks/distribute")
+def distribute_task(body: AssignTaskIn):
+    """经理 agent 把内部任务分发给某个员工 agent（distributed）"""
+    return af.distribute_task(body.agent_id, body.task_id)
+
+
+@app.post("/api/tasks/estimate")
+def estimate_task(body: EstimateTaskIn):
+    """员工 agent 审核任务并报价（结合本地记录给工时+工资）"""
+    return af.estimate_task(body.agent_id, body.task_id)
+
+
+@app.post("/api/tasks/{tid}/review-estimate")
+def review_estimate(tid: int, body: ReviewEstimateIn):
+    """经理 agent 审核报价：通过→正式派发 / 打回→重新报价"""
+    return af.review_estimate(tid, body.approve)
+
+
+@app.get("/api/tasks/internal")
+def internal_tasks():
+    """经理看待分发的内部任务"""
+    return {"tasks": af.get_internal_tasks()}
+
+
+@app.get("/api/tasks/estimated")
+def estimated_tasks():
+    """经理看待审核报价的任务"""
+    return {"tasks": af.get_estimated_tasks()}
+
+
+@app.get("/api/agents")
+def list_agents():
+    """所有 Agent（附用户名/岗位/公司），经理分发时选择"""
+    return {"agents": af.list_agents()}
+
+
+@app.get("/api/companies")
+def list_companies():
+    """公司列表（注册时可选）"""
+    return {"companies": company.list_companies()}
+
+
+@app.get("/api/companies/by-code")
+def company_by_code(code: str):
+    """按邀请码查公司"""
+    return company.get_company_by_code(code)
+
+
+@app.get("/api/companies/{cid}")
+def company_detail(cid: int):
+    """公司详情：基本信息 + 邀请码 + 成员列表"""
+    comp = company.get_company(cid)
+    if not comp:
+        return {"ok": False, "msg": "公司不存在"}
+    return {"ok": True, "company": comp, "members": company.get_company_members(cid)}
+
+
+@app.get("/api/records/{uid}")
+def get_records(uid: int):
+    """员工本地记录（个人档案/技能/历史绩效）"""
+    return af.get_user_records(uid)
+
+
+@app.post("/api/records/{uid}")
+def save_records(uid: int, body: SaveRecordIn):
+    """保存员工本地记录"""
+    return af.save_user_records(uid, body.content)
 
 
 @app.post("/api/submissions/submit")

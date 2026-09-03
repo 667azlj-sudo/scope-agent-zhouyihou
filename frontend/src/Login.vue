@@ -40,6 +40,15 @@
             <el-option value="user" label="普通成员" />
           </el-select>
         </el-form-item>
+        <el-form-item v-if="role === 'manager'">
+          <el-input v-model="companyName" placeholder="公司名称" />
+        </el-form-item>
+        <el-form-item v-if="role === 'employee'">
+          <el-input v-model="inviteCode" placeholder="公司邀请码" />
+        </el-form-item>
+        <el-form-item v-if="role === 'manager' || role === 'employee'">
+          <el-input v-model="position" placeholder="公司岗位，如：后端工程师" />
+        </el-form-item>
       </template>
 
       <el-button type="primary" style="width: 100%" :loading="loading" @click="submit">
@@ -63,6 +72,7 @@ const emit = defineEmits(["logged-in"])
 const isRegister = ref(false)
 const account = ref(""), name = ref(""), password = ref("")
 const phone = ref(""), code = ref(""), role = ref("")
+const companyName = ref(""), inviteCode = ref(""), position = ref("")
 const loading = ref(false), countdown = ref(0)
 let timer = null
 
@@ -95,13 +105,16 @@ async function submit() {
     if (!code.value.trim()) { ElMessage.warning("请输入验证码"); return }
     if (!name.value.trim()) { ElMessage.warning("请输入用户名"); return }
     if (!role.value) { ElMessage.warning("请选择你的岗位"); return }
+    if (role.value === "manager" && !companyName.value.trim()) { ElMessage.warning("请填写公司名称"); return }
+    if (role.value === "employee" && !inviteCode.value.trim()) { ElMessage.warning("请填写公司邀请码"); return }
+    if ((role.value === "manager" || role.value === "employee") && !position.value.trim()) { ElMessage.warning("请填写公司岗位"); return }
   } else {
     if (!account.value.trim()) { ElMessage.warning("请输入手机号或用户名"); return }
   }
   loading.value = true
   try {
     if (isRegister.value) {
-      const r = await register(name.value.trim(), password.value, role.value, phone.value.trim(), code.value.trim())
+      const r = await register(name.value.trim(), password.value, role.value, phone.value.trim(), code.value.trim(), companyName.value.trim(), inviteCode.value.trim(), position.value.trim())
       if (!r.ok) { ElMessage.error(r.msg); return }
       ElMessage.success("注册成功，请登录")
       toggleMode()
