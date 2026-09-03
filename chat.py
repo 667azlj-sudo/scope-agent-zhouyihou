@@ -274,17 +274,19 @@ def mark_read(chat_id, user_id):
 
 
 def get_user_chats(user_id):
-    """当前用户的会话列表（含最新消息、真正的未读计数）"""
+    """当前用户的会话列表（含最新消息、真正的未读计数）。有未读的会话置顶，其余按最新消息排序。"""
     conn = get_conn()
     rows = conn.execute(
         "SELECT c.id, c.type, c.name, "
         "(SELECT content FROM messages m WHERE m.chat_id=c.id ORDER BY m.id DESC LIMIT 1) AS last_msg, "
+        "(SELECT COALESCE(MAX(id),0) FROM messages m WHERE m.chat_id=c.id) AS last_msg_id, "
         "(SELECT COUNT(*) FROM messages m WHERE m.chat_id=c.id AND m.status='normal' "
         " AND m.sender_id!=? AND m.id > COALESCE("
         "   (SELECT last_read_id FROM chat_reads r WHERE r.chat_id=c.id AND r.user_id=?), 0)"
         ") AS unread "
         "FROM chats c JOIN chat_members cm ON c.id=cm.chat_id "
-        "WHERE cm.user_id=? ORDER BY c.id DESC",
+        "WHERE cm.user_id=? "
+        "ORDER BY (unread > 0) DESC, last_msg_id DESC",
         (user_id, user_id, user_id)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
