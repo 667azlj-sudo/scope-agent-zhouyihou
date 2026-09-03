@@ -20,7 +20,7 @@ _cloud_client = None
 DEEPSEEK_BASE = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"
 LOCAL_MODEL = "gemma4:26b"
-_KEY_FILE = "llm_key.txt"   # 运行时保存的 key（已 gitignore，勿提交）
+from config import LLM_KEY_FILE as _KEY_FILE   # 运行时保存的 key（已 gitignore，勿提交）
 
 
 def set_cloud_key(api_key):

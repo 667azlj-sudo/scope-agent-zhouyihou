@@ -1,12 +1,17 @@
 // src/api.js —— 后端 API 封装（走相对路径，由 Vite 代理转发到后端）
 const BASE = ""
 
-async function api(path, method = "GET", body = null, token = null) {
-  const headers = { "Content-Type": "application/json" }
-  if (token) headers["Authorization"] = "Bearer " + token
+function authHeaders(extra = {}) {
+  const h = { ...extra }
+  const t = localStorage.getItem("token")
+  if (t) h["Authorization"] = "Bearer " + t
+  return h
+}
+
+async function api(path, method = "GET", body = null) {
   const res = await fetch(BASE + path, {
     method,
-    headers,
+    headers: authHeaders({ "Content-Type": "application/json" }),
     body: body ? JSON.stringify(body) : null,
   })
   return res.json()
@@ -16,6 +21,9 @@ export const register = (name, password, role, phone, code, companyName, inviteC
 export const login = (account, password) => api("/api/login", "POST", { account, password })
 export const smsSend = (phone) => api("/api/sms/send", "POST", { phone })
 export const agentChat = (message, userId) => api("/api/agent/chat", "POST", { message, user_id: userId })
+export const getProfile = (uid) => api(`/api/profile/${uid}`)
+export const setProfile = (uid, info, habits) => api(`/api/profile/${uid}`, "POST", { info, habits })
+export const indexProfile = (uid) => api(`/api/profile/${uid}/index`, "POST", {})
 export const createProject = (description) => api("/api/projects", "POST", { description })
 export const getTasks = (pid) => api(`/api/projects/${pid}/tasks`)
 export const buildKnowledge = (texts) => api("/api/knowledge/build", "POST", { texts })
@@ -31,7 +39,7 @@ export function sendImage(cid, token, file) {
   const fd = new FormData()
   fd.append("token", token)
   fd.append("file", file)
-  return fetch(`/api/chats/${cid}/image`, { method: "POST", body: fd }).then(r => r.json())
+  return fetch(`/api/chats/${cid}/image`, { method: "POST", headers: authHeaders(), body: fd }).then(r => r.json())
 }
 export const confirmTask = (tid, user) => api(`/api/tasks/${tid}/confirm`, "POST", { user })
 export const proposeTask = (tid, user, newContent) => api(`/api/tasks/${tid}/propose`, "POST", { user, new_content: newContent })
@@ -44,7 +52,7 @@ export const splitTask = (title, detail, managerId) => api("/api/tasks/split", "
 export function uploadTaskFile(file) {
   const fd = new FormData()
   fd.append("file", file)
-  return fetch(`/api/tasks/file`, { method: "POST", body: fd }).then(r => r.json())
+  return fetch(`/api/tasks/file`, { method: "POST", headers: authHeaders(), body: fd }).then(r => r.json())
 }
 export const pendingClassify = () => api("/api/tasks/pending-classify")
 export const classifyTask = (tid, choice) => api(`/api/tasks/${tid}/classify`, "POST", { choice })
@@ -78,7 +86,7 @@ export const importWorkRecordsFromChats = (uid) => api(`/api/records/work/${uid}
 export function uploadWorkRecordFile(uid, file) {
   const fd = new FormData()
   fd.append("file", file)
-  return fetch(`/api/records/work/${uid}/upload`, { method: "POST", body: fd }).then(r => r.json())
+  return fetch(`/api/records/work/${uid}/upload`, { method: "POST", headers: authHeaders(), body: fd }).then(r => r.json())
 }
 
 // 个人能力知识库（读取电脑 → RAG）
@@ -86,7 +94,7 @@ export const getAbilityStats = (uid) => api(`/api/knowledge/${uid}/stats`)
 export function uploadAbilityFiles(uid, files) {
   const fd = new FormData()
   for (const f of files) fd.append("files", f)
-  return fetch(`/api/knowledge/${uid}/upload`, { method: "POST", body: fd }).then(r => r.json())
+  return fetch(`/api/knowledge/${uid}/upload`, { method: "POST", headers: authHeaders(), body: fd }).then(r => r.json())
 }
 
 // 知识库② 任务条件
@@ -111,7 +119,7 @@ export const markChatRead = (cid, token) => api(`/api/chats/${cid}/read`, "POST"
 export function uploadSubmissionImage(file) {
   const fd = new FormData()
   fd.append("file", file)
-  return fetch(`/api/submissions/image`, { method: "POST", body: fd }).then(r => r.json())
+  return fetch(`/api/submissions/image`, { method: "POST", headers: authHeaders(), body: fd }).then(r => r.json())
 }
 export const reviewSubmission = (sid, approve, exempt, customPrice) => api(`/api/submissions/${sid}/review`, "POST", { approve, exempt, custom_price: customPrice })
 export const setSalary = (uid, baseSalary, exempt) => api(`/api/salary/${uid}/set`, "POST", { base_salary: baseSalary, exempt })

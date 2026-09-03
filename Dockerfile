@@ -5,6 +5,10 @@ FROM python:3.12-slim
 # 工作目录
 WORKDIR /app
 
+# 数据持久化目录（docker-compose 挂载卷到 /app/data）
+ENV DATA_DIR=/app/data
+RUN mkdir -p /app/data
+
 # 先拷贝依赖清单，安装依赖（利用 Docker 缓存，改代码不用重装依赖）
 COPY requirements.txt .
 RUN pip install -r requirements.txt --no-cache-dir

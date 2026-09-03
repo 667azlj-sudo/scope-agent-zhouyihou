@@ -33,7 +33,7 @@
 | 大模型 | Ollama（gemma4）/ DeepSeek |
 | 向量化 | bge-m3（不可用时退化为 BM25） |
 | 后端 | FastAPI + Uvicorn |
-| 数据库 | SQLite |
+| 数据库 | PostgreSQL（生产，DATABASE_URL）/ SQLite（开发回退） |
 | 前端 | Vue 3 + Vite + Element Plus |
 
 ## 快速开始
@@ -62,6 +62,33 @@ npm run dev
 
 > 手机号验证码：配置 `ALIYUN_AK_ID`、`ALIYUN_AK_SECRET`、`ALIYUN_SIGN_NAME`、`ALIYUN_TEMPLATE_CODE` 后走真实阿里云短信；未配置时自动退回本地模拟（验证码在后端日志/接口返回）。
 
+## 个人知识库 + DeepSeek RAG
+
+员工在本地建立个人知识库（信息 / 习惯 / 文档 / 聊天记录），RAG 时由 **DeepSeek 读取用户信息与习惯**并个性化作答。
+
+- 检索用**本地 BM25**（jieba），不依赖 Ollama / bge-m3；个人知识库较小时整库交给 DeepSeek 阅读，较大时用 BM25 收窄。
+- 生成走 **DeepSeek API**（`llm.chat`，配置 `DEEPSEEK_API_KEY` 即启用，否则回退本地模型）。
+
+接口：
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET / POST | `/api/profile/{uid}` | 读取 / 保存用户「信息与习惯」画像 |
+| POST | `/api/profile/{uid}/index` | 把画像 + 工作记录 + 聊天记录 + 能力库索引进本地知识库 |
+| POST | `/api/agent/chat` | `{user_id, message}` → DeepSeek 读取画像与片段作答 |
+
+## 生产部署（Docker Compose）
+
+```bash
+cp .env.example .env   # 填入 DEEPSEEK_API_KEY、阿里云短信密钥等
+docker compose up -d --build
+```
+
+- 前端由 Nginx 托管，并反向代理 `/api`、`/uploads` 到后端，入口默认 `http://<主机>:80`。
+- 数据（SQLite、上传文件、知识库）持久化在 `app_data` 卷（容器内 `/app/data`，由环境变量 `DATA_DIR` 控制）。
+- 全部环境变量见 `.env.example`。
+
+> 注意：生产走 PostgreSQL（`DATABASE_URL`），开发回退 SQLite；支付网关仍为模拟，需接入微信/支付宝并替换 `payment.pay_order()`。
+
 ## 目录结构
 
 ```
@@ -74,6 +101,7 @@ scope-agent/
 ├── graphrag.py          GraphRAG 图检索
 ├── splitter.py          任务拆解
 ├── router.py            任务分级路由
+├── config.py            数据目录与环境变量（DATA_DIR 等）
 ├── db.py                业务数据（项目 / 任务 / 用户）
 ├── auth.py              注册登录与角色（手机号 + 验证码）
 ├── sms.py               短信发送（阿里云，未配密钥时模拟）

@@ -8,12 +8,11 @@ payment.py —— SaaS 套餐 / 订单 / 订阅
 paid、订阅生效/续期。后续接入微信支付 / 支付宝时，只需在 `pay_order()` 里
 换成「创建支付单 + 异步回调验签」即可，订单/订阅的表结构和前端无需改动。
 """
-import sqlite3
 import time
 import uuid
 from datetime import datetime, timedelta
 
-DB_PATH = "scope_agent.db"
+from dbcore import get_conn, insert_id
 
 # 内置套餐（价格：元）
 DEFAULT_PLANS = [
@@ -28,18 +27,12 @@ DEFAULT_PLANS = [
 ]
 
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def init_payment_db():
     """建 plans / orders / subscriptions 表并写入内置套餐。"""
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS plans (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         name TEXT NOT NULL,
         price REAL DEFAULT 0,
         duration_days INTEGER DEFAULT 0,
@@ -47,17 +40,17 @@ def init_payment_db():
         description TEXT DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         order_no TEXT NOT NULL UNIQUE,
         user_id INTEGER NOT NULL,
         plan_id INTEGER NOT NULL,
         amount REAL DEFAULT 0,
         status TEXT DEFAULT 'pending',
-        created_at TEXT DEFAULT (datetime('now','localtime')),
+        created_at TEXT DEFAULT (__NOW__),
         paid_at TEXT
     );
     CREATE TABLE IF NOT EXISTS subscriptions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         user_id INTEGER NOT NULL UNIQUE,
         plan_id INTEGER NOT NULL,
         status TEXT DEFAULT 'active',
@@ -65,7 +58,8 @@ def init_payment_db():
         expires_at TEXT
     );
     """)
-    if conn.execute("SELECT COUNT(*) AS c FROM plans").fetchone()["c"] == 0:
+    row = conn.execute("SELECT COUNT(*) AS c FROM plans").fetchone()
+    if row["c"] == 0:
         for p in DEFAULT_PLANS:
             conn.execute(
                 "INSERT INTO plans (name, price, duration_days, agent_limit, description) "
@@ -90,6 +84,13 @@ def get_plan(plan_id):
     return dict(row) if row else None
 
 
+def get_order_by_no(order_no):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM orders WHERE order_no=?", (order_no,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def create_order(user_id, plan_id):
     """创建待支付订单。返回订单 dict。"""
     plan = get_plan(plan_id)
@@ -97,14 +98,15 @@ def create_order(user_id, plan_id):
         return {"ok": False, "msg": "套餐不存在"}
     order_no = f"SO{time.strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:6].upper()}"
     conn = get_conn()
-    cur = conn.execute(
+    oid = insert_id(
+        conn,
         "INSERT INTO orders (order_no, user_id, plan_id, amount, status) VALUES (?,?,?,?,'pending')",
         (order_no, user_id, plan_id, plan["price"]),
     )
     conn.commit()
     conn.close()
     return {"ok": True, "order_no": order_no, "amount": plan["price"],
-            "plan_name": plan["name"], "id": cur.lastrowid}
+            "plan_name": plan["name"], "id": oid}
 
 
 def pay_order(order_no):
@@ -123,7 +125,7 @@ def pay_order(order_no):
         return {"ok": False, "msg": "订单已支付"}
     plan = get_plan(order["plan_id"])
     now = datetime.now()
-    conn.execute("UPDATE orders SET status='paid', paid_at=datetime('now','localtime') WHERE order_no=?",
+    conn.execute("UPDATE orders SET status='paid', paid_at=__NOW__ WHERE order_no=?",
                  (order_no,))
 
     sub = conn.execute("SELECT * FROM subscriptions WHERE user_id=?", (order["user_id"],)).fetchone()

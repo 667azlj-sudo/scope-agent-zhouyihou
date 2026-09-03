@@ -14,9 +14,8 @@ agent_framework.py —— 多 Agent 协作框架核心
 """
 import json
 import re
-import sqlite3
 
-DB_PATH = "scope_agent.db"
+from dbcore import get_conn, insert_id, ensure_column, IntegrityErrors
 
 ROLE_TYPES = ("employee", "functional", "manager")
 
@@ -24,27 +23,21 @@ ROLE_TYPES = ("employee", "functional", "manager")
 BASE_TOOLS = ["query_db", "message_agent", "get_task", "submit_work"]
 
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row   # 让查询结果能按列名访问
-    return conn
-
-
 def init_agent_db():
     """建 5 张表：agents / agent_tasks / submissions / agent_messages / salaries"""
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS agents (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         user_id INTEGER NOT NULL UNIQUE,
         role_type TEXT NOT NULL,
         name TEXT NOT NULL,
         config TEXT DEFAULT '{}',
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
 
     CREATE TABLE IF NOT EXISTS agent_tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         title TEXT NOT NULL,
         detail TEXT DEFAULT '',
         difficulty REAL DEFAULT 0.5,
@@ -53,96 +46,90 @@ def init_agent_db():
         assignee_agent INTEGER,
         manager_agent INTEGER,
         classification TEXT DEFAULT '一般',
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
 
     CREATE TABLE IF NOT EXISTS submissions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         task_id INTEGER NOT NULL,
         agent_id INTEGER NOT NULL,
         content TEXT NOT NULL,
         status TEXT DEFAULT 'pending',
         price REAL DEFAULT 0,
-        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        created_at TEXT DEFAULT (__NOW__),
         FOREIGN KEY (task_id) REFERENCES agent_tasks(id)
     );
 
     CREATE TABLE IF NOT EXISTS agent_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         from_agent INTEGER NOT NULL,
         to_agent INTEGER NOT NULL,
         content TEXT NOT NULL,
         priority INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
 
     CREATE TABLE IF NOT EXISTS salaries (
         user_id INTEGER PRIMARY KEY,
         base_salary REAL DEFAULT 0,
         exempt INTEGER DEFAULT 0,
-        updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        updated_at TEXT DEFAULT (__NOW__)
     );
 
     CREATE TABLE IF NOT EXISTS payouts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         submission_id INTEGER NOT NULL UNIQUE,
         user_id INTEGER NOT NULL,
         agent_id INTEGER,
         amount REAL DEFAULT 0,
         status TEXT DEFAULT 'pending',
-        created_at TEXT DEFAULT (datetime('now', 'localtime')),
+        created_at TEXT DEFAULT (__NOW__),
         paid_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS user_records (
         user_id INTEGER PRIMARY KEY,
         content TEXT DEFAULT '',
-        updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        updated_at TEXT DEFAULT (__NOW__)
     );
 
     CREATE TABLE IF NOT EXISTS work_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         user_id INTEGER NOT NULL,
         content TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
 
     CREATE TABLE IF NOT EXISTS task_conditions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         company_id INTEGER,
         keywords TEXT DEFAULT '',
         conditions TEXT DEFAULT '',
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
 
     CREATE TABLE IF NOT EXISTS notifications (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         user_id INTEGER NOT NULL,
         content TEXT NOT NULL,
         task_id INTEGER,
         is_read INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
     """)
     conn.commit()
     # 迁移：agent_tasks 增加报价相关列
-    cols = [r["name"] for r in conn.execute("PRAGMA table_info(agent_tasks)").fetchall()]
     for col, typ in [("estimated_hours", "REAL"), ("estimated_wage", "REAL"),
                      ("estimate_reason", "TEXT"), ("agreed_wage", "REAL"),
                      ("suitability", "TEXT"), ("suitability_reason", "TEXT"),
                      ("conditions", "TEXT"), ("needs_conditions", "INTEGER"),
                      ("candidates", "TEXT"), ("outsource_accepter", "INTEGER"),
                      ("outsource_accepter_company", "INTEGER")]:
-        if col not in cols:
-            conn.execute(f"ALTER TABLE agent_tasks ADD COLUMN {col} {typ}")
-    # 迁移：submissions 增加 images 列（照片凭证）
-    scols = [r["name"] for r in conn.execute("PRAGMA table_info(submissions)").fetchall()]
-    if "images" not in scols:
-        conn.execute("ALTER TABLE submissions ADD COLUMN images TEXT DEFAULT '[]'")
-    if "stage" not in scols:
-        conn.execute("ALTER TABLE submissions ADD COLUMN stage TEXT DEFAULT 'submitted'")
-    if "tech_reviewer" not in scols:
-        conn.execute("ALTER TABLE submissions ADD COLUMN tech_reviewer INTEGER")
+        ensure_column(conn, "agent_tasks", col, typ)
+    # 迁移：submissions 增加 images / stage / tech_reviewer 列
+    ensure_column(conn, "submissions", "images", "TEXT DEFAULT '[]'")
+    ensure_column(conn, "submissions", "stage", "TEXT DEFAULT 'submitted'")
+    ensure_column(conn, "submissions", "tech_reviewer", "INTEGER")
     conn.commit()
     conn.close()
     # 迁移：旧表没有 classification 列的话，ALTER TABLE 补上
@@ -153,12 +140,8 @@ def _migrate_agent_tasks_classification():
     """老数据库的 agent_tasks 表可能没有 classification 列，补上（TEXT 默认 '一般'）。"""
     conn = get_conn()
     try:
-        cols = [r["name"] for r in conn.execute("PRAGMA table_info(agent_tasks)").fetchall()]
-        if "classification" not in cols:
-            conn.execute(
-                "ALTER TABLE agent_tasks ADD COLUMN classification TEXT DEFAULT '一般'"
-            )
-            conn.commit()
+        ensure_column(conn, "agent_tasks", "classification", "TEXT DEFAULT '一般'")
+        conn.commit()
     finally:
         conn.close()
 
@@ -232,15 +215,15 @@ def create_agent(user_id, role_type, name, config=None):
         raise ValueError("config 必须是 dict")
     conn = get_conn()
     try:
-        cur = conn.execute(
+        aid = insert_id(
+            conn,
             "INSERT INTO agents (user_id, role_type, name, config) VALUES (?,?,?,?)",
             (user_id, role_type, name, json.dumps(cfg, ensure_ascii=False)),
         )
         conn.commit()
-    except sqlite3.IntegrityError:
+    except IntegrityErrors:
         conn.close()
         raise ValueError(f"用户 {user_id} 已有员工Agent")
-    aid = cur.lastrowid
     conn.close()
     return {"id": aid, "user_id": user_id, "role_type": role_type,
             "name": name, "config": cfg}
@@ -327,14 +310,15 @@ def split_task(title, detail, manager_agent_id=None):
                 difficulty = max(0.0, min(1.0, float(item.get("difficulty", 0.5))))
             except (TypeError, ValueError):
                 difficulty = 0.5
-            cur = conn.execute(
+            tid = insert_id(
+                conn,
                 "INSERT INTO agent_tasks (title, detail, difficulty, assignee_role, status, "
                 "manager_agent, classification) VALUES (?,?,?,?,?,?,?)",
                 (sub_title, sub_detail, difficulty, assignee_role, "pending_classify",
                  manager_agent_id, classification),
             )
             created.append({
-                "id": cur.lastrowid,
+                "id": tid,
                 "title": sub_title,
                 "detail": sub_detail,
                 "assignee_role": assignee_role,
@@ -635,13 +619,13 @@ def accept_outsource(task_id, user_id):
 def add_task(title, detail="", difficulty=0.5, manager_agent_id=None):
     """新建一个任务（可直接入库），返回任务 dict"""
     conn = get_conn()
-    cur = conn.execute(
+    tid = insert_id(
+        conn,
         "INSERT INTO agent_tasks (title, detail, difficulty, status, manager_agent) "
         "VALUES (?,?,?,?,?)",
         (title, detail, difficulty, "pending", manager_agent_id),
     )
     conn.commit()
-    tid = cur.lastrowid
     conn.close()
     return {"id": tid, "title": title, "detail": detail, "difficulty": difficulty,
             "status": "pending", "manager_agent": manager_agent_id}
@@ -708,7 +692,7 @@ def get_user_records(user_id):
 def save_user_records(user_id, content):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO user_records (user_id, content, updated_at) VALUES (?,?,datetime('now','localtime')) "
+        "INSERT INTO user_records (user_id, content, updated_at) VALUES (?,?,__NOW__) "
         "ON CONFLICT(user_id) DO UPDATE SET content=excluded.content, "
         "updated_at=excluded.updated_at",
         (user_id, content or ""),
@@ -726,10 +710,10 @@ def add_work_record(user_id, content):
     if not content:
         return {"ok": False, "msg": "工作记录内容为空"}
     conn = get_conn()
-    cur = conn.execute("INSERT INTO work_records (user_id, content) VALUES (?,?)", (user_id, content))
+    rid = insert_id(conn, "INSERT INTO work_records (user_id, content) VALUES (?,?)", (user_id, content))
     conn.commit()
     conn.close()
-    return {"ok": True, "id": cur.lastrowid}
+    return {"ok": True, "id": rid}
 
 
 def get_work_records(user_id):
@@ -739,12 +723,17 @@ def get_work_records(user_id):
     return [dict(r) for r in rows]
 
 
-def delete_work_record(record_id):
+def delete_work_record(record_id, user_id=None):
+    """删除工作记录；提供 user_id 时仅能删自己的（经理传 None 可删任意）。"""
     conn = get_conn()
-    conn.execute("DELETE FROM work_records WHERE id=?", (record_id,))
+    if user_id is not None:
+        cur = conn.execute("DELETE FROM work_records WHERE id=? AND user_id=?", (record_id, user_id))
+    else:
+        cur = conn.execute("DELETE FROM work_records WHERE id=?", (record_id,))
     conn.commit()
+    deleted = cur.rowcount
     conn.close()
-    return {"ok": True}
+    return {"ok": True, "deleted": deleted}
 
 
 # ---------------------------------------------------------------------------
@@ -752,13 +741,14 @@ def delete_work_record(record_id):
 # ---------------------------------------------------------------------------
 def add_task_condition(company_id, keywords, conditions):
     conn = get_conn()
-    cur = conn.execute(
+    cid = insert_id(
+        conn,
         "INSERT INTO task_conditions (company_id, keywords, conditions) VALUES (?,?,?)",
         (company_id, (keywords or "").strip(), (conditions or "").strip()),
     )
     conn.commit()
     conn.close()
-    return {"ok": True, "id": cur.lastrowid}
+    return {"ok": True, "id": cid}
 
 
 def get_task_conditions(company_id):
@@ -796,11 +786,11 @@ def query_task_conditions(task_title, task_detail, company_id):
 # ---------------------------------------------------------------------------
 def create_notification(user_id, content, task_id=None):
     conn = get_conn()
-    cur = conn.execute("INSERT INTO notifications (user_id, content, task_id) VALUES (?,?,?)",
-                       (user_id, content, task_id))
+    nid = insert_id(conn, "INSERT INTO notifications (user_id, content, task_id) VALUES (?,?,?)",
+                    (user_id, content, task_id))
     conn.commit()
     conn.close()
-    return {"ok": True, "id": cur.lastrowid}
+    return {"ok": True, "id": nid}
 
 
 def get_notifications(user_id, unread_only=False):
@@ -1007,13 +997,13 @@ def submit_work(task_id, agent_id, content, images=None):
         conn.close()
         return {"ok": False, "msg": "任务不存在"}
     imgs = json.dumps(list(images or []), ensure_ascii=False)
-    cur = conn.execute(
+    sid = insert_id(
+        conn,
         "INSERT INTO submissions (task_id, agent_id, content, status, images) VALUES (?,?,?,?,?)",
         (task_id, agent_id, content, "pending", imgs),
     )
     conn.execute("UPDATE agent_tasks SET status='submitted' WHERE id=?", (task_id,))
     conn.commit()
-    sid = cur.lastrowid
     conn.close()
     return {"ok": True, "id": sid, "task_id": task_id, "agent_id": agent_id,
             "content": content, "status": "pending", "images": list(images or [])}
@@ -1034,15 +1024,12 @@ def price_task(base_salary, difficulty):
 def update_salary(user_id, base_salary, exempt=0):
     """更新（或写入）员工工资：base_salary 与 exempt（是否豁免绩效）。"""
     conn = get_conn()
-    try:
-        conn.execute("INSERT INTO salaries (user_id, base_salary, exempt) VALUES (?,?,?)",
-                     (user_id, base_salary, int(exempt)))
-    except sqlite3.IntegrityError:
-        conn.execute(
-            "UPDATE salaries SET base_salary=?, exempt=?, updated_at=datetime('now','localtime') "
-            "WHERE user_id=?",
-            (base_salary, int(exempt), user_id),
-        )
+    conn.execute(
+        "INSERT INTO salaries (user_id, base_salary, exempt) VALUES (?,?,?) "
+        "ON CONFLICT(user_id) DO UPDATE SET base_salary=excluded.base_salary, "
+        "exempt=excluded.exempt, updated_at=__NOW__",
+        (user_id, base_salary, int(exempt)),
+    )
     conn.commit()
     conn.close()
     return {"user_id": user_id, "base_salary": base_salary, "exempt": int(exempt)}
@@ -1408,7 +1395,7 @@ def pay_payout(payout_id):
         conn.close()
         return {"ok": False, "msg": "该笔已打款，无需重复操作"}
     conn.execute(
-        "UPDATE payouts SET status='paid', paid_at=datetime('now','localtime') WHERE id=?",
+        "UPDATE payouts SET status='paid', paid_at=__NOW__ WHERE id=?",
         (payout_id,),
     )
     conn.commit()
@@ -1420,7 +1407,7 @@ def pay_all_payouts():
     """每月固定时间：把当月所有待打款一次性发放。"""
     conn = get_conn()
     n = conn.execute("SELECT COUNT(*) AS c FROM payouts WHERE status='pending'").fetchone()["c"]
-    conn.execute("UPDATE payouts SET status='paid', paid_at=datetime('now','localtime') WHERE status='pending'")
+    conn.execute("UPDATE payouts SET status='paid', paid_at=__NOW__ WHERE status='pending'")
     conn.commit()
     conn.close()
     return {"ok": True, "count": n, "msg": f"已发放 {n} 笔工资"}
@@ -1445,12 +1432,12 @@ def get_payout_stats():
 def message_between(from_agent, to_agent, content, priority=0):
     """agent 之间发消息（priority 越大越优先，经理指令优先）。"""
     conn = get_conn()
-    cur = conn.execute(
+    mid = insert_id(
+        conn,
         "INSERT INTO agent_messages (from_agent, to_agent, content, priority) VALUES (?,?,?,?)",
         (from_agent, to_agent, content, priority),
     )
     conn.commit()
-    mid = cur.lastrowid
     conn.close()
     return {"id": mid, "from_agent": from_agent, "to_agent": to_agent,
             "content": content, "priority": priority}
@@ -1459,17 +1446,37 @@ def message_between(from_agent, to_agent, content, priority=0):
 # ---------------------------------------------------------------------------
 # 查询工具（供 agent 使用）
 # ---------------------------------------------------------------------------
+_SENSITIVE_TABLES = ("users", "sessions", "sms_codes", "orders", "subscriptions")
+_SENSITIVE_COLUMNS = ("password_hash", "password", "token")
+_MAX_QUERY_ROWS = 200
+
+
 def query_db(agent_id, sql):
-    """只读查询数据库（仅允许 SELECT），供 query_db 工具使用。"""
-    sql = (sql or "").strip()
-    if not sql.upper().startswith("SELECT"):
+    """只读查询数据库（仅允许 SELECT），供 query_db 工具使用。
+
+    安全限制：仅 SELECT、禁敏感表/字段、禁多语句与写操作、强制 LIMIT 上限。
+    """
+    sql = (sql or "").strip().rstrip(";")
+    upper = sql.upper()
+    if not upper.startswith("SELECT"):
         return {"error": "只允许 SELECT 查询"}
+    for kw in (";", "DROP", "INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "ATTACH", "REPLACE"):
+        if kw in upper:
+            return {"error": "仅允许只读 SELECT"}
+    for t in _SENSITIVE_TABLES:
+        if f" {t.upper()} " in f" {upper} ":
+            return {"error": "禁止查询用户/会话/验证码/订单/订阅等敏感表"}
+    for c in _SENSITIVE_COLUMNS:
+        if c.upper() in upper:
+            return {"error": "禁止查询敏感字段"}
+    if "LIMIT" not in upper:
+        sql = sql + f" LIMIT {_MAX_QUERY_ROWS}"
     conn = get_conn()
     try:
         cur = conn.execute(sql)
-        rows = cur.fetchall()
-        cols = [d[0] for d in cur.description] if cur.description else []
-        data = [dict(zip(cols, r)) for r in rows]
+        rows = cur.fetchmany(_MAX_QUERY_ROWS)
+        data = [dict(r) for r in rows]
+        cols = list(data[0].keys()) if data else []
         return {"columns": cols, "rows": data, "count": len(data)}
     except Exception as e:
         return {"error": str(e)}

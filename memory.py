@@ -4,17 +4,9 @@ memory.py —— 用户画像记忆
 update_memory：用 LLM 提炼对话 → 更新用户画像（存 users.memory）
 get_memory：读取用户画像
 """
-import sqlite3
-
 import llm
 
-DB_PATH = "scope_agent.db"
-
-
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+from dbcore import get_conn
 
 
 def get_memory(user_id):

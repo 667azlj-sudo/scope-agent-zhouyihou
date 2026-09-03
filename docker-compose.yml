@@ -1,0 +1,51 @@
+# ============ 生产编排：PostgreSQL + 后端 + 前端 ============
+# 用法：cp .env.example .env 并填入真实密钥，然后 docker compose up -d --build
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-scope}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-scope}
+      POSTGRES_DB: ${POSTGRES_DB:-scope_agent}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scope} -d ${POSTGRES_DB:-scope_agent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: .
+    environment:
+      HOST: "0.0.0.0"
+      DATA_DIR: "/app/data"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-scope}:${POSTGRES_PASSWORD:-scope}@db:5432/${POSTGRES_DB:-scope_agent}
+      # 密钥通过 .env 注入（未配置时短信退模拟、LLM 回退本地 Ollama）
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      ALIYUN_AK_ID: ${ALIYUN_AK_ID:-}
+      ALIYUN_AK_SECRET: ${ALIYUN_AK_SECRET:-}
+      ALIYUN_SIGN_NAME: ${ALIYUN_SIGN_NAME:-}
+      ALIYUN_TEMPLATE_CODE: ${ALIYUN_TEMPLATE_CODE:-}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    volumes:
+      - app_data:/app/data
+    expose:
+      - "8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  app_data:
+  pg_data:

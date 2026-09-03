@@ -3,12 +3,16 @@
 app.py —— Web 后端（FastAPI）
 统一暴露业务 API
 """
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import os
+import uuid
+
+import config
 import db
 import auth
 import chat
@@ -20,24 +24,95 @@ import llm
 import memory
 import sms
 import payment
+import personal_rag
 import agent_framework as af
 from splitter import split_project, set_cloud_key, is_cloud
 from router import route
 
 app = FastAPI(title="Scope Agent 权责分化系统")
 
+_allowed_origins = [
+    o.strip()
+    for o in os.environ.get(
+        "ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173"
+    ).split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ---- 鉴权：除白名单外的 /api/* 都要求登录 ----
+PUBLIC_API_PATHS = {"/api/login", "/api/register", "/api/sms/send", "/api/config/llm"}
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path.rstrip("/")
+    if path.startswith("/api/") and path not in PUBLIC_API_PATHS:
+        user = auth.get_user_by_token(auth.parse_bearer(request.headers.get("authorization", "")))
+        if not user:
+            return JSONResponse({"ok": False, "msg": "未登录或登录已过期"}, status_code=401)
+        request.state.user = user
+    return await call_next(request)
+
+
+def _current_user(request: Request):
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="未登录")
+    return user
+
+
+def require_role(*roles):
+    """依赖工厂：要求当前登录用户属于指定角色。"""
+    def checker(request: Request):
+        user = getattr(request.state, "user", None)
+        if not user:
+            raise HTTPException(status_code=401, detail="未登录")
+        if user["role"] not in roles:
+            raise HTTPException(status_code=403, detail="权限不足")
+        return user
+    return checker
+
+
+def _self_uid(user: dict, uid: int):
+    """个人数据保护：非经理强制使用本人 id，经理可指定他人（查看下属）。"""
+    if user["role"] == "manager":
+        return uid
+    return user["id"]
+
+
 # 挂载上传目录为静态文件（图片消息用）
-import os
-os.makedirs("uploads", exist_ok=True)
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+config.ensure_dirs()
+app.mount("/uploads", StaticFiles(directory=config.UPLOAD_DIR), name="uploads")
+
+# ---- 上传安全：文件名白名单 + 大小限制 ----
+ALLOWED_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+ALLOWED_TEXT_EXTS = {".txt", ".md", ".log", ".csv", ".json"}
+ALLOWED_FILE_EXTS = ALLOWED_IMAGE_EXTS | ALLOWED_TEXT_EXTS | {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".zip"}
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)) or "0") or (20 * 1024 * 1024)
+
+
+def _safe_upload_filename(filename, allowed_exts, fallback_ext=".bin"):
+    """生成安全的落盘文件名：丢弃一切路径成分，只保留白名单扩展名，用 uuid 命名。"""
+    name = os.path.basename((filename or "").replace("\\", "/"))
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in allowed_exts:
+        ext = fallback_ext
+    return f"{uuid.uuid4().hex[:16]}{ext}"
+
+
+async def _read_upload_bytes(file):
+    """读取上传内容并做大小限制；超限抛 ValueError。"""
+    data = await file.read()
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise ValueError("文件过大")
+    return data
 
 # 启动时确保表存在 + 加载知识库 + 从环境变量加载云端 LLM key
 db.init_db()
@@ -144,15 +219,19 @@ class MessageIn(BaseModel):
 
 
 @app.post("/api/chats")
-def create_chat(body: ChatIn):
-    """创建会话（私聊/群聊）"""
-    cid = chat.create_chat(body.type, body.name, tuple(body.member_ids))
+def create_chat(body: ChatIn, user: dict = Depends(_current_user)):
+    """创建会话（私聊/群聊），创建者自动计入成员"""
+    mids = list(body.member_ids)
+    if user["id"] not in mids:
+        mids.append(user["id"])
+    cid = chat.create_chat(body.type, body.name, tuple(mids))
     return {"chat_id": cid}
 
 
 @app.get("/api/chats/user/{uid}")
-def user_chats(uid: int):
+def user_chats(uid: int, user: dict = Depends(_current_user)):
     """当前用户的会话列表（含最新消息、未读）"""
+    uid = _self_uid(user, uid)
     return {"chats": chat.get_user_chats(uid)}
 
 
@@ -248,6 +327,9 @@ def send_sms(body: SmsSendIn):
     phone = _normalize_phone(body.phone)
     if not phone:
         return {"ok": False, "msg": "手机号格式不正确"}
+    can_send, send_err = auth.can_send_code(phone)
+    if not can_send:
+        return {"ok": False, "msg": send_err}
     code = auth.create_verify_code(phone)
     ok, mock, msg = sms.send_sms(phone, code)
     if not ok:
@@ -333,6 +415,17 @@ def login(body: LoginIn):
     return {"ok": False, "msg": result}
 
 
+class LogoutIn(BaseModel):
+    token: str
+
+
+@app.post("/api/logout")
+def logout(body: LogoutIn):
+    """退出登录，使 token 失效"""
+    auth.logout(body.token)
+    return {"ok": True, "msg": "已退出登录"}
+
+
 class FriendIn(BaseModel):
     user_id: int
     target_id: int
@@ -345,31 +438,32 @@ class FriendApproveIn(BaseModel):
 
 
 @app.post("/api/friends/add")
-def add_friend(body: FriendIn):
+def add_friend(body: FriendIn, user: dict = Depends(_current_user)):
     """加好友（员工加负责人直接通过；员工之间需负责人审核）"""
     target = auth.get_user_by_id(body.target_id)
     if not target:
         return {"ok": False, "msg": "目标用户不存在"}
-    status = chat.add_friend(body.user_id, body.target_id, body.requester_role, target["role"])
+    status = chat.add_friend(user["id"], body.target_id, user["role"], target["role"])
     return {"ok": True, "status": status}
 
 
 @app.get("/api/friends/pending")
-def pending_friends():
+def pending_friends(user: dict = Depends(require_role("manager"))):
     """查待审核的好友申请（负责人用）"""
     return {"pending": chat.pending_friendships()}
 
 
 @app.post("/api/friends/{fid}/approve")
-def approve_friend(fid: int, body: FriendApproveIn):
+def approve_friend(fid: int, body: FriendApproveIn, user: dict = Depends(require_role("manager"))):
     """负责人审核好友申请"""
-    ok, msg = chat.approve_friend(fid, body.approve, body.approver_role)
+    ok, msg = chat.approve_friend(fid, body.approve, user["role"])
     return {"ok": ok, "msg": msg}
 
 
 @app.get("/api/friends/{uid}")
-def friends_list(uid: int):
+def friends_list(uid: int, user: dict = Depends(_current_user)):
     """查某人的好友列表"""
+    uid = _self_uid(user, uid)
     return {"friends": chat.get_friends(uid)}
 
 
@@ -390,12 +484,15 @@ async def upload(pid: int, user: str = Form(...), file: UploadFile = File(...)):
     u = auth.get_user(user)
     if not u or u["role"] != "manager":
         return {"ok": False, "msg": "权限不足：只有负责人能上传"}
-    import os
-    os.makedirs("uploads", exist_ok=True)
-    path = os.path.join("uploads", file.filename)
+    os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+    try:
+        data = await _read_upload_bytes(file)
+    except ValueError:
+        return {"ok": False, "msg": f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
+    path = os.path.join(config.UPLOAD_DIR, _safe_upload_filename(file.filename, ALLOWED_FILE_EXTS))
     with open(path, "wb") as f:
-        f.write(await file.read())          # 保存文件到 uploads/
-    fid = chat.upload_file(pid, file.filename, path, u["id"])
+        f.write(data)
+    fid = chat.upload_file(pid, os.path.basename(file.filename or ""), path, u["id"])
     return {"ok": True, "msg": "上传成功", "file_id": fid}
 
 
@@ -407,12 +504,15 @@ async def send_file(fid: int, user_token: str = Form(...), file: UploadFile = Fi
         return {"ok": False, "msg": "未登录或 token 无效"}
     if not chat.is_friend(user["id"], fid):
         return {"ok": False, "msg": "仅好友之间可传文件"}
-    import os
-    os.makedirs("uploads", exist_ok=True)
-    path = os.path.join("uploads", file.filename)
+    os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+    try:
+        data = await _read_upload_bytes(file)
+    except ValueError:
+        return {"ok": False, "msg": f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
+    path = os.path.join(config.UPLOAD_DIR, _safe_upload_filename(file.filename, ALLOWED_FILE_EXTS))
     with open(path, "wb") as f:
-        f.write(await file.read())
-    file_id = chat.upload_file(0, file.filename, path, user["id"])
+        f.write(data)
+    file_id = chat.upload_file(0, os.path.basename(file.filename or ""), path, user["id"])
     return {"ok": True, "msg": "已传文件", "file_id": file_id}
 
 
@@ -422,13 +522,15 @@ async def send_image(cid: int, token: str = Form(...), file: UploadFile = File(.
     user = auth.get_user_by_token(token)
     if not user:
         return {"ok": False, "msg": "未登录或 token 无效"}
-    import uuid
-    os.makedirs("uploads", exist_ok=True)
-    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
-    filename = f"chat_{uuid.uuid4().hex[:12]}{ext}"
-    path = os.path.join("uploads", filename)
+    os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+    try:
+        data = await _read_upload_bytes(file)
+    except ValueError:
+        return {"ok": False, "msg": f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
+    filename = _safe_upload_filename(file.filename, ALLOWED_IMAGE_EXTS, ".jpg")
+    path = os.path.join(config.UPLOAD_DIR, filename)
     with open(path, "wb") as f:
-        f.write(await file.read())
+        f.write(data)
     chat.send_message(cid, user["id"], f"/uploads/{filename}", "image")
     return {"ok": True, "msg": "已发送图片", "url": f"/uploads/{filename}"}
 
@@ -488,14 +590,14 @@ class SetSalaryIn(BaseModel):
 
 
 @app.post("/api/agents/{user_id}/create")
-def create_agent(user_id: int, body: CreateAgentIn):
+def create_agent(user_id: int, body: CreateAgentIn, user: dict = Depends(require_role("manager"))):
     """为员工建立 Agent（user_id 唯一）"""
     agent = af.create_agent(user_id, body.role_type, body.name, body.config)
     return {"agent_id": agent["id"]}
 
 
 @app.post("/api/tasks/split")
-def split_task(body: SplitTaskIn):
+def split_task(body: SplitTaskIn, user: dict = Depends(require_role("manager"))):
     """让 LLM 把任务拆成子任务并入库"""
     subtasks = af.split_task(body.title, body.detail, body.manager_agent_id)
     return {"subtasks": subtasks}
@@ -504,44 +606,48 @@ def split_task(body: SplitTaskIn):
 @app.post("/api/tasks/file")
 async def upload_task_file(file: UploadFile = File(...)):
     """新建任务时上传参考文件：保存并解析文本，供拆解时并入描述。"""
-    import uuid
-    os.makedirs("uploads", exist_ok=True)
-    ext = os.path.splitext(file.filename or "")[1] or ".txt"
-    filename = f"task_{uuid.uuid4().hex[:12]}{ext}"
-    path = os.path.join("uploads", filename)
-    data = await file.read()
+    os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+    try:
+        data = await _read_upload_bytes(file)
+    except ValueError:
+        return {"ok": False, "msg": f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
+    filename = _safe_upload_filename(file.filename, ALLOWED_FILE_EXTS, ".txt")
+    path = os.path.join(config.UPLOAD_DIR, filename)
     with open(path, "wb") as f:
         f.write(data)
     text = _read_text_bytes(data).strip()[:5000]
-    return {"ok": True, "url": f"/uploads/{filename}", "filename": file.filename, "text": text}
+    return {"ok": True, "url": f"/uploads/{filename}", "filename": os.path.basename(file.filename or ""), "text": text}
 
 
 @app.get("/api/tasks/pending-classify")
-def pending_classify():
+def pending_classify(user: dict = Depends(require_role("manager"))):
     """经理看待确认分级（pending_classify）的子任务列表"""
     return {"tasks": af.get_pending_classification()}
 
 
 @app.post("/api/tasks/{tid}/classify")
-def classify(tid: int, body: ClassifyTaskIn):
+def classify(tid: int, body: ClassifyTaskIn, user: dict = Depends(require_role("manager"))):
     """经理选择分级：internal=机密→内部分配 / outsource=一般→外包候选"""
     return af.manager_choose(tid, body.choice)
 
 
 @app.post("/api/tasks/distribute")
-def distribute_task(body: AssignTaskIn):
+def distribute_task(body: AssignTaskIn, user: dict = Depends(require_role("manager"))):
     """经理 agent 把内部任务分发给某个员工 agent（distributed）"""
     return af.distribute_task(body.agent_id, body.task_id)
 
 
 @app.post("/api/tasks/estimate")
-def estimate_task(body: EstimateTaskIn):
+def estimate_task(body: EstimateTaskIn, user: dict = Depends(_current_user)):
     """员工 agent 审核任务并报价（结合本地记录给工时+工资）"""
+    agent = af.get_agent_by_user(user["id"])
+    if not agent or agent["id"] != body.agent_id:
+        return {"ok": False, "msg": "只能用自己的 Agent 报价"}
     return af.estimate_task(body.agent_id, body.task_id)
 
 
 @app.post("/api/tasks/{tid}/review-estimate")
-def review_estimate(tid: int, body: ReviewEstimateIn):
+def review_estimate(tid: int, body: ReviewEstimateIn, user: dict = Depends(require_role("manager"))):
     """经理 agent 审核报价：通过→正式派发(改价则待员工确认) / 打回→重新报价"""
     return af.review_estimate(tid, body.approve, body.custom_wage)
 
@@ -552,19 +658,19 @@ class ConfirmPriceIn(BaseModel):
 
 
 @app.post("/api/tasks/{tid}/confirm-price")
-def confirm_price(tid: int, body: ConfirmPriceIn):
+def confirm_price(tid: int, body: ConfirmPriceIn, user: dict = Depends(_current_user)):
     """员工确认经理改价：同意→派发 / 不同意→返回经理重新定价"""
-    return af.employee_confirm_price(tid, body.user_id, body.agree)
+    return af.employee_confirm_price(tid, user["id"], body.agree)
 
 
 @app.get("/api/tasks/internal")
-def internal_tasks():
+def internal_tasks(user: dict = Depends(require_role("manager"))):
     """经理看待分发的内部任务"""
     return {"tasks": af.get_internal_tasks()}
 
 
 @app.get("/api/tasks/estimated")
-def estimated_tasks():
+def estimated_tasks(user: dict = Depends(require_role("manager"))):
     """经理看待审核报价的任务"""
     return {"tasks": af.get_estimated_tasks()}
 
@@ -578,27 +684,28 @@ class ClaimTaskIn(BaseModel):
 
 
 @app.get("/api/tasks/unmatched")
-def unmatched_tasks():
+def unmatched_tasks(user: dict = Depends(require_role("manager"))):
     """经理端：无人接手的任务"""
     return {"tasks": af.get_unmatched_tasks()}
 
 
 @app.post("/api/tasks/{tid}/publish-hall")
-def publish_hall(tid: int, body: PublishHallIn):
+def publish_hall(tid: int, body: PublishHallIn, user: dict = Depends(require_role("manager"))):
     """经理选候选人后发布到任务大厅"""
     return af.publish_to_hall(tid, body.candidate_ids)
 
 
 @app.get("/api/hall/{uid}")
-def hall_tasks(uid: int):
+def hall_tasks(uid: int, user: dict = Depends(_current_user)):
     """任务大厅：该用户作为候选人的待接取任务"""
+    uid = _self_uid(user, uid)
     return {"tasks": af.get_hall_tasks(uid)}
 
 
 @app.post("/api/hall/{tid}/claim")
-def claim_task(tid: int, body: ClaimTaskIn):
+def claim_task(tid: int, body: ClaimTaskIn, user: dict = Depends(_current_user)):
     """候选人接取大厅任务"""
-    return af.claim_task(tid, body.user_id)
+    return af.claim_task(tid, user["id"])
 
 
 class AcceptOutsourceIn(BaseModel):
@@ -612,30 +719,33 @@ def outsource_tasks():
 
 
 @app.post("/api/outsource/{tid}/accept")
-def accept_outsource(tid: int, body: AcceptOutsourceIn):
+def accept_outsource(tid: int, body: AcceptOutsourceIn, user: dict = Depends(_current_user)):
     """其他公司的人接取外包任务"""
-    return af.accept_outsource(tid, body.user_id)
+    return af.accept_outsource(tid, user["id"])
 
 
 @app.get("/api/agents")
-def list_agents():
-    """所有 Agent（附用户名/岗位/公司），经理分发时选择"""
-    return {"agents": af.list_agents()}
+def list_agents(user: dict = Depends(_current_user)):
+    """本公司 Agent（经理分发时选择）"""
+    cid = user.get("company_id")
+    return {"agents": [a for a in af.list_agents() if not cid or a.get("company_id") == cid]}
 
 
 @app.get("/api/users")
-def list_users():
-    """所有用户（建群/拉人时选择成员用）"""
+def list_users(user: dict = Depends(_current_user)):
+    """本公司用户（建群/拉人时选择成员用）"""
+    cid = user.get("company_id")
     return {"users": [
         {"id": u["id"], "name": u["name"], "role": u["role"],
          "position": u.get("position"), "company_id": u.get("company_id")}
         for u in auth.get_all_users()
+        if not cid or u.get("company_id") == cid
     ]}
 
 
 @app.get("/api/companies")
-def list_companies():
-    """公司列表（注册时可选）"""
+def list_companies(user: dict = Depends(require_role("manager"))):
+    """公司列表（负责人用）"""
     return {"companies": company.list_companies()}
 
 
@@ -646,8 +756,10 @@ def company_by_code(code: str):
 
 
 @app.get("/api/companies/{cid}")
-def company_detail(cid: int):
-    """公司详情：基本信息 + 邀请码 + 成员列表"""
+def company_detail(cid: int, user: dict = Depends(_current_user)):
+    """公司详情：基本信息 + 邀请码 + 成员列表（仅本公司成员可见）"""
+    if user.get("company_id") != cid:
+        return {"ok": False, "msg": "无权查看该公司"}
     comp = company.get_company(cid)
     if not comp:
         return {"ok": False, "msg": "公司不存在"}
@@ -655,14 +767,16 @@ def company_detail(cid: int):
 
 
 @app.get("/api/records/{uid}")
-def get_records(uid: int):
+def get_records(uid: int, user: dict = Depends(_current_user)):
     """员工本地记录（个人档案/技能/历史绩效）"""
+    uid = _self_uid(user, uid)
     return af.get_user_records(uid)
 
 
 @app.post("/api/records/{uid}")
-def save_records(uid: int, body: SaveRecordIn):
+def save_records(uid: int, body: SaveRecordIn, user: dict = Depends(_current_user)):
     """保存员工本地记录"""
+    uid = _self_uid(user, uid)
     return af.save_user_records(uid, body.content)
 
 
@@ -672,18 +786,21 @@ class WorkRecordIn(BaseModel):
 
 
 @app.get("/api/records/work/{uid}")
-def get_work_records(uid: int):
+def get_work_records(uid: int, user: dict = Depends(_current_user)):
+    uid = _self_uid(user, uid)
     return {"records": af.get_work_records(uid)}
 
 
 @app.post("/api/records/work/{uid}")
-def add_work_record(uid: int, body: WorkRecordIn):
+def add_work_record(uid: int, body: WorkRecordIn, user: dict = Depends(_current_user)):
+    uid = _self_uid(user, uid)
     return af.add_work_record(uid, body.content)
 
 
 @app.delete("/api/records/work/{rid}")
-def delete_work_record(rid: int):
-    return af.delete_work_record(rid)
+def delete_work_record(rid: int, user: dict = Depends(_current_user)):
+    uid = None if user["role"] == "manager" else user["id"]
+    return af.delete_work_record(rid, uid)
 
 
 def _read_text_bytes(data: bytes) -> str:
@@ -697,9 +814,13 @@ def _read_text_bytes(data: bytes) -> str:
 
 
 @app.post("/api/records/work/{uid}/upload")
-async def upload_work_record_file(uid: int, file: UploadFile = File(...)):
+async def upload_work_record_file(uid: int, file: UploadFile = File(...), user: dict = Depends(_current_user)):
     """上传文档，解析文本内容存入工作记录。"""
-    data = await file.read()
+    uid = _self_uid(user, uid)
+    try:
+        data = await _read_upload_bytes(file)
+    except ValueError:
+        return {"ok": False, "msg": f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
     text = _read_text_bytes(data).strip()
     if not text:
         return {"ok": False, "msg": "无法解析该文档，请上传文本类文件（.txt/.md/.log/.csv 等）"}
@@ -707,8 +828,9 @@ async def upload_work_record_file(uid: int, file: UploadFile = File(...)):
 
 
 @app.post("/api/records/work/{uid}/from-chats")
-def import_work_records_from_chats(uid: int):
+def import_work_records_from_chats(uid: int, user: dict = Depends(_current_user)):
     """把该用户最近发的聊天消息导入为工作记录。"""
+    uid = _self_uid(user, uid)
     msgs = chat.get_user_sent_messages(uid, limit=30)
     if not msgs:
         return {"ok": False, "msg": "没有可导入的聊天记录"}
@@ -719,11 +841,15 @@ def import_work_records_from_chats(uid: int):
 
 # ---- 个人能力知识库（让 Agent 读取电脑 → RAG）----
 @app.post("/api/knowledge/{uid}/upload")
-async def upload_ability_files(uid: int, files: list[UploadFile] = File(...)):
+async def upload_ability_files(uid: int, files: list[UploadFile] = File(...), user: dict = Depends(_current_user)):
     """员工选择本地文件夹/文档上传，RAG 进个人能力知识库。"""
+    uid = _self_uid(user, uid)
     texts = []
     for f in files:
-        data = await f.read()
+        try:
+            data = await _read_upload_bytes(f)
+        except ValueError:
+            return {"ok": False, "msg": f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
         text = _read_text_bytes(data).strip()
         if text:
             texts.append(text[:3000])
@@ -739,13 +865,53 @@ async def upload_ability_files(uid: int, files: list[UploadFile] = File(...)):
 
 
 @app.get("/api/knowledge/{uid}/stats")
-def ability_kb_stats(uid: int):
+def ability_kb_stats(uid: int, user: dict = Depends(_current_user)):
+    uid = _self_uid(user, uid)
     return {"count": ability_kb.stats(uid)}
 
 
 @app.get("/api/knowledge/{uid}/search")
-def ability_kb_search(uid: int, q: str = ""):
+def ability_kb_search(uid: int, q: str = "", user: dict = Depends(_current_user)):
+    uid = _self_uid(user, uid)
     return {"hits": ability_kb.search(uid, q, top_k=3)}
+
+
+# ---- 用户本地个人知识库 + DeepSeek RAG ----
+class ProfileIn(BaseModel):
+    info: str = ""
+    habits: str = ""
+
+
+class AgentChatIn(BaseModel):
+    message: str
+    user_id: int
+
+
+@app.get("/api/profile/{uid}")
+def get_profile(uid: int, user: dict = Depends(_current_user)):
+    """读取用户画像（信息与习惯）"""
+    uid = _self_uid(user, uid)
+    return {"ok": True, "profile": personal_rag.get_profile(uid)}
+
+
+@app.post("/api/profile/{uid}")
+def set_profile(uid: int, body: ProfileIn, user: dict = Depends(_current_user)):
+    """保存/更新用户画像（信息与习惯）"""
+    uid = _self_uid(user, uid)
+    return personal_rag.upsert_profile(uid, body.info, body.habits)
+
+
+@app.post("/api/profile/{uid}/index")
+def index_profile(uid: int, user: dict = Depends(_current_user)):
+    """把画像 + 工作记录 + 聊天记录 + 能力库统一索引到本地知识库"""
+    uid = _self_uid(user, uid)
+    return personal_rag.index_user_sources(uid)
+
+
+@app.post("/api/agent/chat")
+def agent_chat(body: AgentChatIn, user: dict = Depends(_current_user)):
+    """RAG 问答：DeepSeek 读取用户信息/习惯与检索片段后个性化作答"""
+    return personal_rag.ask(user["id"], body.message)
 
 
 # ---- 知识库②：任务条件 ----
@@ -761,23 +927,25 @@ def get_task_conditions(company_id: int):
 
 
 @app.post("/api/conditions")
-def add_task_condition(body: TaskConditionIn):
+def add_task_condition(body: TaskConditionIn, user: dict = Depends(require_role("manager"))):
     return af.add_task_condition(body.company_id, body.keywords, body.conditions)
 
 
 @app.delete("/api/conditions/{cid}")
-def delete_task_condition(cid: int):
+def delete_task_condition(cid: int, user: dict = Depends(require_role("manager"))):
     return af.delete_task_condition(cid)
 
 
 # ---- 通知 ----
 @app.get("/api/notifications/{uid}")
-def get_notifications(uid: int):
+def get_notifications(uid: int, user: dict = Depends(_current_user)):
+    uid = _self_uid(user, uid)
     return {"notifications": af.get_notifications(uid)}
 
 
 @app.post("/api/notifications/{uid}/read")
-def read_notifications(uid: int):
+def read_notifications(uid: int, user: dict = Depends(_current_user)):
+    uid = _self_uid(user, uid)
     return af.mark_notifications_read(uid)
 
 
@@ -792,11 +960,14 @@ class AddMemberIn(BaseModel):
 
 
 @app.post("/api/chats/group")
-def create_group(body: CreateGroupIn):
-    """几人一起建群（member_ids 需包含创建者）"""
+def create_group(body: CreateGroupIn, user: dict = Depends(_current_user)):
+    """几人一起建群（创建者自动计入成员）"""
     if not body.member_ids:
         return {"ok": False, "msg": "请至少选择一位成员"}
-    cid = chat.create_chat("group", body.name, tuple(body.member_ids))
+    mids = list(body.member_ids)
+    if user["id"] not in mids:
+        mids.append(user["id"])
+    cid = chat.create_chat("group", body.name, tuple(mids))
     return {"ok": True, "chat_id": cid}
 
 
@@ -806,7 +977,7 @@ def chat_members(cid: int):
 
 
 @app.post("/api/chats/{cid}/members")
-def add_member(cid: int, body: AddMemberIn):
+def add_member(cid: int, body: AddMemberIn, user: dict = Depends(require_role("manager"))):
     """经理强拉人进群"""
     return chat.add_chat_member(cid, body.user_id)
 
@@ -823,50 +994,56 @@ class RespondInviteIn(BaseModel):
 
 
 @app.post("/api/chats/{cid}/invite")
-def create_group_invite(cid: int, body: GroupInviteIn):
+def create_group_invite(cid: int, body: GroupInviteIn, user: dict = Depends(_current_user)):
     """员工发起加群申请（需对方 + 经理双审）"""
-    return chat.create_group_invite(cid, body.requester_id, body.target_id)
+    return chat.create_group_invite(cid, user["id"], body.target_id)
 
 
 @app.get("/api/invites/target/{uid}")
-def invites_for_target(uid: int):
+def invites_for_target(uid: int, user: dict = Depends(_current_user)):
     """被加的人：待我审核的加群申请"""
+    uid = _self_uid(user, uid)
     return {"invites": chat.get_invites_for_target(uid)}
 
 
 @app.get("/api/invites/manager")
-def invites_for_manager():
+def invites_for_manager(user: dict = Depends(require_role("manager"))):
     """经理：待我审核的加群申请"""
     return {"invites": chat.get_pending_invites_for_manager()}
 
 
 @app.post("/api/invites/{iid}/respond")
-def respond_invite(iid: int, body: RespondInviteIn):
+def respond_invite(iid: int, body: RespondInviteIn, user: dict = Depends(_current_user)):
     """对方 / 经理审核加群申请"""
-    return chat.respond_group_invite(iid, body.user_id, body.approve, body.role)
+    return chat.respond_group_invite(iid, user["id"], body.approve, user["role"])
 
 
 @app.post("/api/submissions/image")
 async def upload_submission_image(file: UploadFile = File(...)):
     """员工上传成果凭证照片，返回可访问的 URL"""
-    import uuid
-    os.makedirs("uploads", exist_ok=True)
-    ext = os.path.splitext(file.filename or "")[1] or ".jpg"
-    filename = f"sub_{uuid.uuid4().hex[:12]}{ext}"
-    path = os.path.join("uploads", filename)
+    os.makedirs(config.UPLOAD_DIR, exist_ok=True)
+    try:
+        data = await _read_upload_bytes(file)
+    except ValueError:
+        return {"ok": False, "msg": f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
+    filename = _safe_upload_filename(file.filename, ALLOWED_IMAGE_EXTS, ".jpg")
+    path = os.path.join(config.UPLOAD_DIR, filename)
     with open(path, "wb") as f:
-        f.write(await file.read())
+        f.write(data)
     return {"ok": True, "url": f"/uploads/{filename}"}
 
 
 @app.post("/api/submissions/submit")
-def submit_work(body: SubmitWorkIn):
+def submit_work(body: SubmitWorkIn, user: dict = Depends(_current_user)):
     """员工提交成果（可附照片凭证）"""
+    agent = af.get_agent_by_user(user["id"])
+    if not agent or agent["id"] != body.agent_id:
+        return {"ok": False, "msg": "只能提交自己的工作"}
     return af.submit_work(body.task_id, body.agent_id, body.content, body.images)
 
 
 @app.post("/api/submissions/{sid}/review")
-def review_submission(sid: int, body: ReviewSubmissionIn):
+def review_submission(sid: int, body: ReviewSubmissionIn, user: dict = Depends(require_role("manager"))):
     """审核提交（经理可选豁免绩效 / 手动改价）"""
     return af.review_submission(sid, body.approve, body.exempt, body.custom_price)
 
@@ -893,27 +1070,27 @@ def agent_check(sid: int):
 
 
 @app.post("/api/submissions/{sid}/manager-test")
-def manager_test(sid: int):
+def manager_test(sid: int, user: dict = Depends(require_role("manager"))):
     """阶段②：经理 agent 跑小项目测试"""
     return af.manager_test_submission(sid)
 
 
 @app.post("/api/submissions/{sid}/manager-verify")
-def manager_verify(sid: int, body: ManagerVerifyIn):
+def manager_verify(sid: int, body: ManagerVerifyIn, user: dict = Depends(require_role("manager"))):
     """阶段③：经理核验（可改价）"""
     return af.manager_verify_submission(sid, body.approve, body.custom_price)
 
 
 @app.post("/api/submissions/{sid}/designate-tech")
-def designate_tech(sid: int, body: DesignateTechIn):
+def designate_tech(sid: int, body: DesignateTechIn, user: dict = Depends(require_role("manager"))):
     """经理指定技术人员"""
     return af.designate_tech_reviewer(sid, body.user_id)
 
 
 @app.post("/api/submissions/{sid}/tech-verify")
-def tech_verify(sid: int, body: TechVerifyIn):
+def tech_verify(sid: int, body: TechVerifyIn, user: dict = Depends(_current_user)):
     """阶段④：技术人员验证"""
-    return af.tech_verify_submission(sid, body.user_id, body.approve)
+    return af.tech_verify_submission(sid, user["id"], body.approve)
 
 
 # ---- 工资发放方式 ----
@@ -927,26 +1104,27 @@ def get_pay_mode(cid: int):
 
 
 @app.post("/api/company/{cid}/pay-mode")
-def set_pay_mode(cid: int, body: PayModeIn):
+def set_pay_mode(cid: int, body: PayModeIn, user: dict = Depends(require_role("manager"))):
     return company.set_pay_mode(cid, body.pay_mode)
 
 
 @app.post("/api/payouts/pay-all")
-def pay_all_payouts():
+def pay_all_payouts(user: dict = Depends(require_role("manager"))):
     """每月固定时间：一次性发放所有待打款工资"""
     return af.pay_all_payouts()
 
 
 @app.post("/api/salary/{uid}/set")
-def set_salary(uid: int, body: SetSalaryIn):
+def set_salary(uid: int, body: SetSalaryIn, user: dict = Depends(require_role("manager"))):
     """更新员工工资与豁免标记"""
     return af.update_salary(uid, body.base_salary, body.exempt)
 
 
 # ---- 查询接口：员工「我的任务 / 我的工资」 + 经理「工作台 / 审核」 ----
 @app.get("/api/agents/user/{uid}")
-def get_agent_by_user(uid: int):
+def get_agent_by_user(uid: int, user: dict = Depends(_current_user)):
     """按 user_id 查员工专属 Agent（不存在返回 None）"""
+    uid = _self_uid(user, uid)
     return af.get_agent_by_user(uid)
 
 
@@ -957,19 +1135,20 @@ def get_agent_tasks(agent_id: int):
 
 
 @app.get("/api/salary/{uid}")
-def get_salary(uid: int):
+def get_salary(uid: int, user: dict = Depends(_current_user)):
     """员工「我的工资」：基础工资 + 豁免标记"""
+    uid = _self_uid(user, uid)
     return af.get_salary(uid)
 
 
 @app.get("/api/submissions/pending")
-def get_pending_submissions():
+def get_pending_submissions(user: dict = Depends(require_role("manager"))):
     """经理「审核」：待审核的提交列表"""
     return {"submissions": af.get_pending_submissions()}
 
 
 @app.get("/api/dashboard/stats")
-def dashboard_stats():
+def dashboard_stats(user: dict = Depends(require_role("manager"))):
     """经理「工作台」：待办与团队概览"""
     return {
         "pending_classify": len(af.get_pending_classification()),
@@ -980,20 +1159,21 @@ def dashboard_stats():
 
 # ---- 工资结算 / 打款 ----
 @app.get("/api/payouts")
-def get_payouts():
+def get_payouts(user: dict = Depends(require_role("manager"))):
     """经理「结算」：全部结算记录（含待打款 / 已打款）"""
     return {"payouts": af.get_payouts(), "stats": af.get_payout_stats()}
 
 
 @app.post("/api/payouts/{pid}/pay")
-def pay_payout(pid: int):
+def pay_payout(pid: int, user: dict = Depends(require_role("manager"))):
     """经理打款：把某笔待打款置为已打款"""
     return af.pay_payout(pid)
 
 
 @app.get("/api/payouts/user/{uid}")
-def get_user_payouts(uid: int):
+def get_user_payouts(uid: int, user: dict = Depends(_current_user)):
     """员工「到账记录」"""
+    uid = _self_uid(user, uid)
     return {"payouts": af.get_user_payouts(uid)}
 
 
@@ -1010,20 +1190,24 @@ def get_plans():
 
 
 @app.post("/api/orders")
-def create_order(body: CreateOrderIn):
+def create_order(body: CreateOrderIn, user: dict = Depends(_current_user)):
     """创建订单（待支付）"""
-    return payment.create_order(body.user_id, body.plan_id)
+    return payment.create_order(user["id"], body.plan_id)
 
 
 @app.post("/api/orders/{order_no}/pay")
-def pay_order(order_no: str):
+def pay_order(order_no: str, user: dict = Depends(_current_user)):
     """模拟支付成功（真实支付网关接入后替换此逻辑）"""
+    order = payment.get_order_by_no(order_no)
+    if order and order["user_id"] != user["id"] and user["role"] != "manager":
+        return {"ok": False, "msg": "只能支付自己的订单"}
     return payment.pay_order(order_no)
 
 
 @app.get("/api/subscriptions/{uid}")
-def get_subscription(uid: int):
+def get_subscription(uid: int, user: dict = Depends(_current_user)):
     """某用户的当前订阅状态"""
+    uid = _self_uid(user, uid)
     return payment.get_subscription(uid)
 
 

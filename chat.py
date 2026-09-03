@@ -3,15 +3,7 @@
 chat.py —— 聊天 + 文件上传（内部协作）
 员工私聊、老板员工群聊、负责人上传资料
 """
-import sqlite3
-
-DB_PATH = "scope_agent.db"
-
-
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+from dbcore import get_conn, insert_id, ensure_column
 
 
 def init_chat_db():
@@ -19,18 +11,18 @@ def init_chat_db():
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS chats (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         type TEXT NOT NULL,                          -- 'direct'私聊 / 'group'群聊
         name TEXT,                                   -- 群聊名（私聊可空）
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
     CREATE TABLE IF NOT EXISTS chat_members (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         chat_id INTEGER NOT NULL,
         user_id INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         chat_id INTEGER NOT NULL,
         sender_id INTEGER NOT NULL,
         content TEXT NOT NULL,
@@ -38,18 +30,18 @@ def init_chat_db():
         lat REAL,
         lng REAL,
         status TEXT DEFAULT 'normal',
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
     CREATE TABLE IF NOT EXISTS files (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         project_id INTEGER NOT NULL,
         filename TEXT NOT NULL,
         filepath TEXT NOT NULL,
         uploaded_by INTEGER NOT NULL,
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
     CREATE TABLE IF NOT EXISTS friendships (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         user_id INTEGER NOT NULL,
         friend_id INTEGER NOT NULL,
         status TEXT DEFAULT 'approved'
@@ -62,30 +54,23 @@ def init_chat_db():
     );
 
     CREATE TABLE IF NOT EXISTS group_invites (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         chat_id INTEGER NOT NULL,
         requester_id INTEGER NOT NULL,
         target_id INTEGER NOT NULL,
         target_approved INTEGER DEFAULT 0,
         manager_approved INTEGER DEFAULT 0,
         status TEXT DEFAULT 'pending',
-        created_at TEXT DEFAULT (datetime('now','localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
     """)
     # 兼容旧表：补 messages 新字段
-    mcols = [r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
-    if "status" not in mcols:
-        conn.execute("ALTER TABLE messages ADD COLUMN status TEXT DEFAULT 'normal'")
-    if "type" not in mcols:
-        conn.execute("ALTER TABLE messages ADD COLUMN type TEXT DEFAULT 'text'")
-    if "lat" not in mcols:
-        conn.execute("ALTER TABLE messages ADD COLUMN lat REAL")
-    if "lng" not in mcols:
-        conn.execute("ALTER TABLE messages ADD COLUMN lng REAL")
+    ensure_column(conn, "messages", "status", "TEXT DEFAULT 'normal'")
+    ensure_column(conn, "messages", "type", "TEXT DEFAULT 'text'")
+    ensure_column(conn, "messages", "lat", "REAL")
+    ensure_column(conn, "messages", "lng", "REAL")
     # 兼容：chats 增加 company_id（总公司群用）
-    ccols = [r["name"] for r in conn.execute("PRAGMA table_info(chats)").fetchall()]
-    if "company_id" not in ccols:
-        conn.execute("ALTER TABLE chats ADD COLUMN company_id INTEGER")
+    ensure_column(conn, "chats", "company_id", "INTEGER")
     conn.commit()
     conn.close()
 
@@ -95,9 +80,9 @@ def create_chat(chat_type, name=None, member_ids=(1, 2)):
     conn = get_conn()
     if chat_type == "group" and not name:
         name = "群聊"
-    cur = conn.execute(
+    chat_id = insert_id(
+        conn,
         "INSERT INTO chats (type, name) VALUES (?,?)", (chat_type, name))
-    chat_id = cur.lastrowid
     for uid in member_ids:
         conn.execute("INSERT INTO chat_members (chat_id, user_id) VALUES (?,?)",
                      (chat_id, uid))
@@ -109,9 +94,9 @@ def create_chat(chat_type, name=None, member_ids=(1, 2)):
 def create_company_chat(company_id, name="总公司群"):
     """创建公司唯一的基础群聊（type='company'），返回 chat_id。"""
     conn = get_conn()
-    cur = conn.execute(
+    chat_id = insert_id(
+        conn,
         "INSERT INTO chats (type, name, company_id) VALUES ('company', ?, ?)", (name, company_id))
-    chat_id = cur.lastrowid
     conn.commit()
     conn.close()
     return chat_id
@@ -180,12 +165,13 @@ def create_group_invite(chat_id, requester_id, target_id):
     if dup:
         conn.close()
         return {"ok": False, "msg": "已有待处理的申请"}
-    cur = conn.execute(
+    gid = insert_id(
+        conn,
         "INSERT INTO group_invites (chat_id, requester_id, target_id) VALUES (?,?,?)",
         (chat_id, requester_id, target_id))
     conn.commit()
     conn.close()
-    return {"ok": True, "id": cur.lastrowid}
+    return {"ok": True, "id": gid}
 
 
 def _invite_with_names(conn, invite_id):
@@ -271,6 +257,16 @@ def send_message(chat_id, sender_id, content, msg_type="text", lat=None, lng=Non
     conn.close()
 
 
+def _minutes_since(created_at):
+    """计算某时间戳距现在的分钟数（跨后端，纯 Python）。"""
+    try:
+        from datetime import datetime
+        dt = datetime.strptime(str(created_at), "%Y-%m-%d %H:%M:%S")
+        return (datetime.now() - dt).total_seconds() / 60
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def withdraw_message(mid, user_id):
     """撤回消息（2分钟内、只能撤回自己的）"""
     conn = get_conn()
@@ -281,10 +277,7 @@ def withdraw_message(mid, user_id):
     if row["sender_id"] != user_id:
         conn.close()
         return False, "只能撤回自己的消息"
-    mins = conn.execute(
-        "SELECT (julianday('now','localtime') - julianday(?)) * 24 * 60 AS m",
-        (row["created_at"],)).fetchone()["m"]
-    if mins > 120:
+    if _minutes_since(row["created_at"]) > 120:
         conn.close()
         return False, "超过2分钟，不能撤回"
     conn.execute("UPDATE messages SET status='withdrawn' WHERE id=?", (mid,))
@@ -318,11 +311,11 @@ def get_user_sent_messages(user_id, limit=30):
 def upload_file(project_id, filename, filepath, uploaded_by):
     """负责人上传资料，返回文件 id"""
     conn = get_conn()
-    cur = conn.execute(
+    file_id = insert_id(
+        conn,
         "INSERT INTO files (project_id, filename, filepath, uploaded_by) VALUES (?,?,?,?)",
         (project_id, filename, filepath, uploaded_by))
     conn.commit()
-    file_id = cur.lastrowid
     conn.close()
     return file_id
 

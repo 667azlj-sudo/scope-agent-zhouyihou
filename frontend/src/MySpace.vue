@@ -9,6 +9,8 @@
       <div class="uid">编号 {{ user.id }}</div>
     </section>
 
+    <ProfileChat :user="user" />
+
     <section class="card">
       <div class="card-title">我的工资</div>
       <div class="salary-row">
@@ -51,6 +53,7 @@
 import { ref, computed, onMounted } from "vue"
 import { getAgentByUser, getMyTasks, getSalary, getUserPayouts } from "./api.js"
 import { roleLabel, money } from "./format.js"
+import ProfileChat from "./ProfileChat.vue"
 
 const props = defineProps(["user"])
 const salary = ref({ base_salary: 0, exempt: 0 })

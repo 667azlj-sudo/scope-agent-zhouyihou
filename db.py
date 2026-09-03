@@ -1,17 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-db.py —— 数据持久化（SQLite）
-存储项目和事项，支持查询
+db.py —— 数据持久化（项目 / 事项）
+统一走 dbcore.get_conn()：生产 PostgreSQL，开发测试 SQLite。
 """
-import sqlite3
-
-DB_PATH = "scope_agent.db"
-
-
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row   # 让查询结果能按列名访问
-    return conn
+from dbcore import get_conn, insert_id
 
 
 def init_db():
@@ -19,12 +11,12 @@ def init_db():
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS projects (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         name TEXT NOT NULL,
-        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
     CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         project_id INTEGER NOT NULL,
         content TEXT NOT NULL,
         type TEXT NOT NULL,
@@ -40,9 +32,8 @@ def init_db():
 def save_project(name):
     """存一个项目，返回它的 id"""
     conn = get_conn()
-    cur = conn.execute("INSERT INTO projects (name) VALUES (?)", (name,))
+    pid = insert_id(conn, "INSERT INTO projects (name) VALUES (?)", (name,))
     conn.commit()
-    pid = cur.lastrowid
     conn.close()
     return pid
 

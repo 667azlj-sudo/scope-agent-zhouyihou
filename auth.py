@@ -1,39 +1,43 @@
 # -*- coding: utf-8 -*-
 """
-auth.py —— 权限审批流
+auth.py —— 权限审批流 + 注册登录鉴权
 负责人拥有确认/审批权；员工可协商，变更需负责人批准
 """
 import hashlib
+import os
 import secrets
-import sqlite3
 import time
 
-DB_PATH = "scope_agent.db"
+from dbcore import get_conn, ensure_column, is_pg, IntegrityErrors
 
 # 验证码有效期（秒）
 SMS_CODE_TTL = 300
 
+# 会话有效期（秒）。默认 7 天，可用环境变量 SESSION_TTL_HOURS 覆盖。
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_HOURS", "168") or "168") * 3600
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+# 验证码重发间隔（秒）。同一手机号在该间隔内不允许重复发送。
+SMS_RESEND_SECONDS = int(os.environ.get("SMS_RESEND_SECONDS", "60") or "60")
+
+# 密码哈希迭代次数
+PBKDF2_ITERATIONS = 100000
 
 
 def init_users():
-    """建 users 和 sessions 表，并兼容旧表（补 password_hash 列）"""
+    """建 users / sessions / sms_codes 表，并兼容旧表（补列）"""
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         name TEXT NOT NULL UNIQUE,
         role TEXT NOT NULL,
         password_hash TEXT DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         token TEXT NOT NULL,
-        user_id INTEGER NOT NULL
+        user_id INTEGER NOT NULL,
+        expires_at INTEGER
     );
     CREATE TABLE IF NOT EXISTS sms_codes (
         phone TEXT PRIMARY KEY,
@@ -41,18 +45,21 @@ def init_users():
         expires_at INTEGER NOT NULL
     );
     """)
-    cols = [r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
-    if "password_hash" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT DEFAULT ''")
-    if "memory" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN memory TEXT DEFAULT '{}'")
-    if "phone" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN phone TEXT")
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone)")
-    if "company_id" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN company_id INTEGER")
-    if "position" not in cols:
-        conn.execute("ALTER TABLE users ADD COLUMN position TEXT")
+    ensure_column(conn, "users", "password_hash", "TEXT DEFAULT ''")
+    ensure_column(conn, "users", "memory", "TEXT DEFAULT '{}'")
+    ensure_column(conn, "users", "phone", "TEXT")
+    ensure_column(conn, "users", "company_id", "INTEGER")
+    ensure_column(conn, "users", "position", "TEXT")
+    # 迁移：sessions 增加 expires_at（token 过期）
+    ensure_column(conn, "sessions", "expires_at", "INTEGER")
+    # phone 唯一索引（幂等）
+    try:
+        if is_pg():
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone ON users(phone)")
+        else:
+            conn.execute("CREATE UNIQUE INDEX idx_users_phone ON users(phone)")
+    except Exception:  # noqa: BLE001
+        pass
     conn.commit()
     conn.close()
 
@@ -97,12 +104,39 @@ def get_all_users():
     return [dict(r) for r in rows]
 
 
-def hash_password(password):
-    return hashlib.pbkdf2_hmac("sha256", password.encode(), b"scope_agent_salt", 100000).hex()
+def hash_password(password, salt=None):
+    """PBKDF2-SHA256 随机盐哈希。返回格式 pbkdf2_sha256$迭代$盐$哈希。
+
+    每个用户使用独立随机盐，避免彩虹表攻击。
+    """
+    salt = salt or secrets.token_hex(16)
+    dk = hashlib.pbkdf2_hmac(
+        "sha256", (password or "").encode(), salt.encode(), PBKDF2_ITERATIONS
+    ).hex()
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${salt}${dk}"
 
 
 def verify_password(password, password_hash):
-    return hash_password(password) == password_hash
+    """校验密码。兼容旧版固定盐格式（裸 hex，不含 $）。"""
+    ph = password_hash or ""
+    if not ph:
+        return False
+    if "$" not in ph:
+        # 旧格式：固定盐 scope_agent_salt，仅作平滑迁移用
+        legacy = hashlib.pbkdf2_hmac(
+            "sha256", (password or "").encode(), b"scope_agent_salt", 100000
+        ).hex()
+        return ph == legacy
+    try:
+        algo, iters, salt, dk = ph.split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        calc = hashlib.pbkdf2_hmac(
+            "sha256", (password or "").encode(), salt.encode(), int(iters)
+        ).hex()
+        return calc == dk
+    except (ValueError, TypeError):
+        return False
 
 
 def _normalize_phone(phone):
@@ -113,6 +147,19 @@ def _normalize_phone(phone):
     if len(p) != 11 or not p.isdigit() or not p.startswith("1"):
         return None
     return p
+
+
+def can_send_code(phone):
+    """防刷：返回 (ok, msg)。同一手机号在 SMS_RESEND_SECONDS 内不允许重复发送。"""
+    conn = get_conn()
+    row = conn.execute("SELECT expires_at FROM sms_codes WHERE phone=?", (phone,)).fetchone()
+    conn.close()
+    if row and row["expires_at"]:
+        remaining = int(row["expires_at"]) - int(time.time())
+        # 距上次发送不足 SMS_RESEND_SECONDS 时拒绝
+        if remaining > SMS_CODE_TTL - SMS_RESEND_SECONDS:
+            return False, "请勿频繁发送验证码，稍后再试"
+    return True, ""
 
 
 def create_verify_code(phone):
@@ -165,7 +212,7 @@ def register(name, password, role, phone=None, company_id=None, position=None):
         )
         conn.commit()
         return True, "注册成功"
-    except sqlite3.IntegrityError:
+    except IntegrityErrors:
         return False, "用户名或手机号已存在"
     finally:
         conn.close()
@@ -184,21 +231,56 @@ def login(account, password):
     if not user or not verify_password(password, user.get("password_hash", "")):
         return None, "用户名或密码错误"
     token = secrets.token_hex(32)
+    expires = int(time.time()) + SESSION_TTL_SECONDS
     conn = get_conn()
-    conn.execute("INSERT INTO sessions (token, user_id) VALUES (?,?)", (token, user["id"]))
+    conn.execute(
+        "INSERT INTO sessions (token, user_id, expires_at) VALUES (?,?,?)",
+        (token, user["id"], expires),
+    )
     conn.commit()
     conn.close()
     return token, user
 
 
 def get_user_by_token(token):
-    """根据 token 查用户"""
+    """根据 token 查用户（已过期则删除该会话并返回 None）"""
+    if not token:
+        return None
     conn = get_conn()
     row = conn.execute(
-        "SELECT u.* FROM users u JOIN sessions s ON u.id=s.user_id WHERE s.token=?",
-        (token,)).fetchone()
+        "SELECT u.*, s.expires_at AS _expires_at FROM users u "
+        "JOIN sessions s ON u.id=s.user_id WHERE s.token=?",
+        (token,),
+    ).fetchone()
+    if not row:
+        conn.close()
+        return None
+    row = dict(row)
+    expires_at = row.pop("_expires_at", None)
+    if expires_at is not None and int(time.time()) > expires_at:
+        conn.execute("DELETE FROM sessions WHERE token=?", (token,))
+        conn.commit()
+        conn.close()
+        return None
     conn.close()
-    return dict(row) if row else None
+    return row
+
+
+def logout(token):
+    """删除会话，使 token 失效。"""
+    conn = get_conn()
+    conn.execute("DELETE FROM sessions WHERE token=?", (token or "",))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def parse_bearer(header):
+    """从 Authorization 头解析 Bearer token；无效返回空串。"""
+    h = (header or "").strip()
+    if h.lower().startswith("bearer "):
+        return h[7:].strip()
+    return ""
 
 
 def confirm_task(task_id, user_name):

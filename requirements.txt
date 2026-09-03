@@ -6,3 +6,4 @@ fastapi
 uvicorn
 python-multipart
 openai
+psycopg[binary]

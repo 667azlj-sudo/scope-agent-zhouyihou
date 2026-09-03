@@ -13,7 +13,7 @@ import numpy as np
 import ollama
 
 EMBED_MODEL = "bge-m3"
-_KNOWLEDGE_FILE = "knowledge_store.json"
+from config import KNOWLEDGE_FILE as _KNOWLEDGE_FILE
 
 # 简单停用词（BM25 分词时过滤，减少噪声）
 STOPWORDS = {"是", "的", "了", "吗", "呢", "啊", "什么", "一个", "这个", "那个", "多少", "怎么"}

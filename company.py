@@ -5,16 +5,9 @@ company.py —— 公司 / 邀请码
 经理注册时创建公司并生成邀请码；员工凭邀请码加入公司。
 """
 import secrets
-import sqlite3
 import string
 
-DB_PATH = "scope_agent.db"
-
-
-def get_conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+from dbcore import get_conn, insert_id, ensure_column, IntegrityErrors
 
 
 def _gen_code():
@@ -28,19 +21,16 @@ def init_company_db():
     conn = get_conn()
     conn.executescript("""
     CREATE TABLE IF NOT EXISTS companies (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id __PK__,
         name TEXT NOT NULL UNIQUE,
         invite_code TEXT NOT NULL UNIQUE,
         manager_id INTEGER,
         pay_mode TEXT DEFAULT 'on_completion',
-        created_at TEXT DEFAULT (datetime('now','localtime'))
+        created_at TEXT DEFAULT (__NOW__)
     );
     """)
-    conn.commit()
     # 迁移：老表补 pay_mode 列
-    cols = [r["name"] for r in conn.execute("PRAGMA table_info(companies)").fetchall()]
-    if "pay_mode" not in cols:
-        conn.execute("ALTER TABLE companies ADD COLUMN pay_mode TEXT DEFAULT 'on_completion'")
+    ensure_column(conn, "companies", "pay_mode", "TEXT DEFAULT 'on_completion'")
     conn.commit()
     conn.close()
 
@@ -48,15 +38,15 @@ def init_company_db():
 def create_company(name, manager_id):
     """经理创建公司，返回公司 dict。同名公司已存在则报错。"""
     conn = get_conn()
+    code = _gen_code()
     try:
-        code = _gen_code()
-        cur = conn.execute(
+        cid = insert_id(
+            conn,
             "INSERT INTO companies (name, invite_code, manager_id) VALUES (?,?,?)",
             (name, code, manager_id),
         )
         conn.commit()
-        cid = cur.lastrowid
-    except sqlite3.IntegrityError:
+    except IntegrityErrors:
         conn.close()
         return None, "公司名已存在"
     conn.close()

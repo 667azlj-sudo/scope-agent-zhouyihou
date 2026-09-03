@@ -13,7 +13,7 @@ import jieba
 import numpy as np
 
 EMBED_MODEL = "bge-m3"
-_KB_DIR = "ability_kb"
+from config import KB_DIR as _KB_DIR
 STOPWORDS = {"是", "的", "了", "吗", "呢", "啊", "什么", "一个", "这个", "那个", "多少", "怎么"}
 
 
