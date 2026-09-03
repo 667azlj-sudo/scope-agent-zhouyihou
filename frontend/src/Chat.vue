@@ -13,7 +13,9 @@
               <template v-if="m.status === 'withdrawn'"><span class="withdrawn">🚫 一条消息被撤回</span></template>
               <template v-else-if="m.type === 'location'">📍 {{ m.lat }}, {{ m.lng }}</template>
               <template v-else-if="m.type === 'image'"><img :src="m.content" class="msg-img" /></template>
-              <template v-else>{{ m.content }}</template>
+              <template v-else>
+                <span v-for="(seg, i) in parseMentions(m.content)" :key="i" :class="{ at: seg.mention }">{{ seg.text }}</span>
+              </template>
             </div>
             <el-button
               v-if="m.sender_id === userId && m.status !== 'withdrawn'"
@@ -25,10 +27,18 @@
       <div class="input-bar">
         <el-input v-model="content" placeholder="输入消息..." @keyup.enter="send" />
         <el-button type="primary" @click="send">发送</el-button>
+        <el-button @click="mentionVisible = true">@</el-button>
         <el-button @click="sendLocation">📍</el-button>
         <el-button @click="fileInput.click()">🖼</el-button>
         <input ref="fileInput" type="file" accept="image/*" hidden @change="sendImageFile" />
       </div>
+
+      <el-dialog v-model="mentionVisible" title="选择要 @ 的人" width="92%">
+        <div v-for="m in members" :key="m.id" class="mention-item" @click="mention(m)">
+          {{ m.name }}{{ m.position ? " · " + m.position : "" }}
+        </div>
+        <p v-if="!members.length" class="empty">暂无成员</p>
+      </el-dialog>
     </template>
     <p v-else class="no-chat">没有会话</p>
   </div>
@@ -36,11 +46,12 @@
 
 <script setup>
 import { ref, onMounted, nextTick } from "vue"
-import { sendMessage, getMessages, withdrawMessage, sendImage, markChatRead } from "./api.js"
+import { sendMessage, getMessages, withdrawMessage, sendImage, markChatRead, getChatMembers } from "./api.js"
 
 const props = defineProps(["token", "userId", "cid"])
 const emit = defineEmits(["back", "read"])
 const messages = ref([]), content = ref(""), chatId = ref(null), msgsRef = ref(null), fileInput = ref(null)
+const members = ref([]), mentionVisible = ref(false)
 
 onMounted(async () => {
   if (props.cid) {
@@ -52,10 +63,24 @@ onMounted(async () => {
 async function load() {
   const r = await getMessages(chatId.value)
   messages.value = r.messages || []
+  // 拉群成员（@ 用）
+  try { members.value = (await getChatMembers(chatId.value)).members || [] } catch (e) { /* 忽略 */ }
   // 打开即已读，消除红点
   try { await markChatRead(chatId.value, props.token); emit("read") } catch (e) { /* 忽略 */ }
   await nextTick()
   if (msgsRef.value) msgsRef.value.scrollTop = msgsRef.value.scrollHeight
+}
+
+function mention(m) {
+  content.value = (content.value ? content.value.replace(/\s*$/, "") + " " : "") + "@" + m.name + " "
+  mentionVisible.value = false
+}
+
+function parseMentions(text) {
+  return (text || "").split(/(@[^\s@，。]+)/g).filter(Boolean).map(part => ({
+    text: part,
+    mention: part.startsWith("@"),
+  }))
 }
 
 async function send() {
@@ -99,6 +124,9 @@ async function sendImageFile(e) {
 .bubble.min { background: #95ec69; }
 .msg-img { max-width: 220px; border-radius: 8px; display: block; }
 .withdrawn { color: #999; font-style: italic; font-size: 13px; }
+.at { color: var(--brand); font-weight: 600; }
+.mention-item { padding: 10px 4px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }
+.mention-item:hover { background: #f5f5f5; }
 .empty { color: #999; }
 .no-chat { color: #999; text-align: center; padding: 48px 0; }
 .input-bar { display: flex; gap: 8px; }

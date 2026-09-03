@@ -45,8 +45,8 @@
 
     <!-- 拉人 -->
     <el-dialog v-model="addMemberVisible" title="拉人进群" width="92%">
-      <div class="pick-title">选择要拉进的成员</div>
-      <el-select v-model="addMemberUserId" placeholder="选择成员" style="width: 100%">
+      <div class="pick-title">选择要拉进的成员（可多选）</div>
+      <el-select v-model="addMemberUserIds" multiple collapse-tags placeholder="选择成员" style="width: 100%">
         <el-option v-for="m in otherMembers" :key="m.id" :label="m.name + (m.position ? ' · ' + m.position : '')" :value="m.id" />
       </el-select>
       <template #footer>
@@ -67,7 +67,7 @@ const emit = defineEmits(["open"])
 const chats = ref([])
 const allUsers = ref([])
 const dialogVisible = ref(false), newGroupName = ref(""), selectedMembers = ref([])
-const addMemberVisible = ref(false), addMemberChatId = ref(null), addMemberUserId = ref(null)
+const addMemberVisible = ref(false), addMemberChatId = ref(null), addMemberUserIds = ref([])
 
 const otherMembers = computed(() => allUsers.value.filter(m => m.id !== props.user.id))
 
@@ -108,14 +108,16 @@ async function doCreateGroup() {
 
 function openAddMember(chat) {
   addMemberChatId.value = chat.id
-  addMemberUserId.value = null
+  addMemberUserIds.value = []
   addMemberVisible.value = true
 }
 
 async function doAddMember() {
-  if (!addMemberUserId.value) { ElMessage.warning("请选择成员"); return }
+  if (!addMemberUserIds.value.length) { ElMessage.warning("请选择要拉进的成员"); return }
   try {
-    await addChatMember(addMemberChatId.value, addMemberUserId.value)
+    for (const uid of addMemberUserIds.value) {
+      await addChatMember(addMemberChatId.value, uid)
+    }
     ElMessage.success("已拉入群聊")
     addMemberVisible.value = false
   } catch (e) {
