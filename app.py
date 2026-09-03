@@ -570,6 +570,22 @@ def claim_task(tid: int, body: ClaimTaskIn):
     return af.claim_task(tid, body.user_id)
 
 
+class AcceptOutsourceIn(BaseModel):
+    user_id: int
+
+
+@app.get("/api/outsource")
+def outsource_tasks():
+    """外包大厅：所有待接取的外包任务（跨公司）"""
+    return {"tasks": af.get_outsource_tasks()}
+
+
+@app.post("/api/outsource/{tid}/accept")
+def accept_outsource(tid: int, body: AcceptOutsourceIn):
+    """其他公司的人接取外包任务"""
+    return af.accept_outsource(tid, body.user_id)
+
+
 @app.get("/api/agents")
 def list_agents():
     """所有 Agent（附用户名/岗位/公司），经理分发时选择"""

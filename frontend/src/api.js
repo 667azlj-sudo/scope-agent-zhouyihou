@@ -60,6 +60,10 @@ export const publishToHall = (taskId, candidateIds) => api(`/api/tasks/${taskId}
 export const getHallTasks = (uid) => api(`/api/hall/${uid}`)
 export const claimTask = (taskId, userId) => api(`/api/hall/${taskId}/claim`, "POST", { user_id: userId })
 
+// 外包大厅
+export const getOutsourceTasks = () => api("/api/outsource")
+export const acceptOutsource = (taskId, userId) => api(`/api/outsource/${taskId}/accept`, "POST", { user_id: userId })
+
 // 知识库① 工作记录
 export const getWorkRecords = (uid) => api(`/api/records/work/${uid}`)
 export const addWorkRecord = (uid, content) => api(`/api/records/work/${uid}`, "POST", { content })

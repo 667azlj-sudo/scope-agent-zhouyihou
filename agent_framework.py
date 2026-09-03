@@ -131,7 +131,8 @@ def init_agent_db():
                      ("estimate_reason", "TEXT"), ("agreed_wage", "REAL"),
                      ("suitability", "TEXT"), ("suitability_reason", "TEXT"),
                      ("conditions", "TEXT"), ("needs_conditions", "INTEGER"),
-                     ("candidates", "TEXT")]:
+                     ("candidates", "TEXT"), ("outsource_accepter", "INTEGER"),
+                     ("outsource_accepter_company", "INTEGER")]:
         if col not in cols:
             conn.execute(f"ALTER TABLE agent_tasks ADD COLUMN {col} {typ}")
     # 迁移：submissions 增加 images 列（照片凭证）
@@ -485,6 +486,64 @@ def claim_task(task_id, user_id):
         return {"ok": False, "msg": "你没有专属 Agent"}
     conn.execute("UPDATE agent_tasks SET status='distributed', assignee_agent=?, candidates='[]' WHERE id=?",
                  (agent["id"], task_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "task_id": task_id, "agent_id": agent["id"], "status": "distributed"}
+
+
+# ---------------------------------------------------------------------------
+# 外包大厅（跨公司接单）
+# ---------------------------------------------------------------------------
+def get_outsource_tasks():
+    """外包大厅：所有待接取的外包任务（附原公司名与负责人名）。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT t.*, c.name AS company_name, u.name AS manager_name, "
+        "       u.company_id AS task_company_id "
+        "FROM agent_tasks t "
+        "LEFT JOIN agents a ON a.id = t.manager_agent "
+        "LEFT JOIN users u ON u.id = a.user_id "
+        "LEFT JOIN companies c ON c.id = u.company_id "
+        "WHERE t.status='outsource' ORDER BY t.id DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def accept_outsource(task_id, user_id):
+    """其他公司的人接取外包任务 → 分发给自己 agent，进入报价流程。"""
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    if not task or task["status"] != "outsource":
+        conn.close()
+        return {"ok": False, "msg": "任务不在外包大厅待接取状态"}
+    task = dict(task)
+
+    user = conn.execute("SELECT company_id FROM users WHERE id=?", (user_id,)).fetchone()
+    if not user:
+        conn.close()
+        return {"ok": False, "msg": "用户不存在"}
+    user_company = user["company_id"]
+
+    # 任务原公司（通过 manager_agent 找到）
+    mgr = conn.execute(
+        "SELECT u.company_id FROM agents a JOIN users u ON u.id=a.user_id WHERE a.id=?",
+        (task.get("manager_agent"),)).fetchone()
+    task_company = mgr["company_id"] if mgr else None
+
+    if task_company is not None and user_company == task_company:
+        conn.close()
+        return {"ok": False, "msg": "不能接自己公司的外包任务"}
+
+    agent = conn.execute("SELECT * FROM agents WHERE user_id=?", (user_id,)).fetchone()
+    if not agent:
+        conn.close()
+        return {"ok": False, "msg": "你没有专属 Agent，无法接取"}
+
+    conn.execute(
+        "UPDATE agent_tasks SET status='distributed', assignee_agent=?, "
+        "outsource_accepter=?, outsource_accepter_company=? WHERE id=?",
+        (agent["id"], user_id, user_company, task_id))
     conn.commit()
     conn.close()
     return {"ok": True, "task_id": task_id, "agent_id": agent["id"], "status": "distributed"}

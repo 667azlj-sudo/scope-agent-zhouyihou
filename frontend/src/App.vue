@@ -26,6 +26,9 @@
       <MySpace v-else-if="tab === 'mine'" :user="user" />
       <Project v-else-if="tab === 'project'" :user="user" />
 
+      <!-- 外包大厅 -->
+      <OutsourceHall v-else-if="tab === 'outsource'" :user="user" />
+
       <!-- 消息 -->
       <ChatList v-else-if="tab === 'chat' && showList" :user="user" @open="openChat" />
       <Chat v-else-if="tab === 'chat'" :token="token" :user-id="user.id" :role="user.role" :cid="currentChatId" @back="backToList" @read="refreshUnread" />
@@ -67,6 +70,7 @@ import MySpace from "./MySpace.vue"
 import MyTasks from "./MyTasks.vue"
 import Billing from "./Billing.vue"
 import Conditions from "./Conditions.vue"
+import OutsourceHall from "./OutsourceHall.vue"
 import { getUserChats } from "./api.js"
 
 function roleName(r) { return r === "manager" ? "负责人" : r === "employee" ? "员工" : "成员" }
@@ -76,16 +80,19 @@ function navFor(role) {
     { key: "work", icon: "🏠", label: "工作台" },
     { key: "task", icon: "📋", label: "任务" },
     { key: "review", icon: "💰", label: "财务" },
+    { key: "outsource", icon: "🌐", label: "外包" },
     { key: "chat", icon: "💬", label: "消息" },
     { key: "friends", icon: "👥", label: "好友" },
   ]
   if (role === "employee") return [
     { key: "mytask", icon: "📋", label: "任务" },
+    { key: "outsource", icon: "🌐", label: "外包" },
     { key: "chat", icon: "💬", label: "消息" },
     { key: "mine", icon: "👤", label: "我的" },
   ]
   // 普通成员
   return [
+    { key: "outsource", icon: "🌐", label: "外包" },
     { key: "chat", icon: "💬", label: "消息" },
     { key: "friends", icon: "👥", label: "好友" },
     { key: "project", icon: "📋", label: "项目" },
