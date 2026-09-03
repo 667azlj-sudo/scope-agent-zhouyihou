@@ -17,7 +17,8 @@
         <span>· 难度 {{ difficultyLabel(t.difficulty) }}</span>
       </div>
       <div class="task-actions">
-        <el-button type="primary" size="small" @click="accept(t)">接取</el-button>
+        <el-button v-if="user.role !== 'manager'" type="primary" size="small" @click="accept(t)">接取</el-button>
+        <el-tag v-else type="info" size="small">经理不能接单</el-tag>
       </div>
     </div>
     <p v-if="!tasks.length" class="empty">暂无外包任务</p>

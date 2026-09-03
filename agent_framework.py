@@ -597,7 +597,7 @@ def get_outsource_tasks():
 
 
 def accept_outsource(task_id, user_id):
-    """任何人接取外包任务 → 分发给自己 agent，进入报价流程。"""
+    """接取外包任务（经理不能接）→ 分发给自己 agent，进入报价流程。"""
     conn = get_conn()
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
     if not task or task["status"] != "outsource":
@@ -605,10 +605,13 @@ def accept_outsource(task_id, user_id):
         return {"ok": False, "msg": "任务不在外包大厅待接取状态"}
     task = dict(task)
 
-    user = conn.execute("SELECT company_id FROM users WHERE id=?", (user_id,)).fetchone()
+    user = conn.execute("SELECT company_id, role FROM users WHERE id=?", (user_id,)).fetchone()
     if not user:
         conn.close()
         return {"ok": False, "msg": "用户不存在"}
+    if user["role"] == "manager":
+        conn.close()
+        return {"ok": False, "msg": "经理不能接取外包任务"}
     user_company = user["company_id"]
 
     agent = conn.execute("SELECT * FROM agents WHERE user_id=?", (user_id,)).fetchone()
