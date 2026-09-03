@@ -316,7 +316,7 @@ def register(body: RegisterIn):
 
     user = auth.get_user(body.name) or (auth.get_user_by_phone(phone) if phone else None)
 
-    # 经理：注册后创建公司并回填负责人
+    # 经理：注册后创建公司并回填负责人 + 建总公司群
     if body.role == "manager" and user:
         comp, err = company.create_company(body.company_name.strip(), user["id"])
         if not comp:
@@ -326,6 +326,16 @@ def register(body: RegisterIn):
         _c.execute("UPDATE users SET company_id=? WHERE id=?", (comp["id"], user["id"]))
         _c.commit()
         _c.close()
+        # 建总公司群并把经理拉进去
+        cid = chat.create_company_chat(comp["id"])
+        chat.add_chat_member(cid, user["id"])
+        company_id = comp["id"]
+
+    # 员工：加入公司后自动进总公司群
+    if body.role == "employee" and user and company_id:
+        cc = chat.get_company_chat(company_id)
+        if cc:
+            chat.add_chat_member(cc["id"], user["id"])
 
     # 自动为经理/员工建专属 Agent（不替员工干活，只做审核/报价/协作）
     if user and body.role in ("manager", "employee"):
@@ -592,6 +602,89 @@ def get_records(uid: int):
 def save_records(uid: int, body: SaveRecordIn):
     """保存员工本地记录"""
     return af.save_user_records(uid, body.content)
+
+
+# ---- 知识库①：工作记录 ----
+class WorkRecordIn(BaseModel):
+    content: str
+
+
+@app.get("/api/records/work/{uid}")
+def get_work_records(uid: int):
+    return {"records": af.get_work_records(uid)}
+
+
+@app.post("/api/records/work/{uid}")
+def add_work_record(uid: int, body: WorkRecordIn):
+    return af.add_work_record(uid, body.content)
+
+
+@app.delete("/api/records/work/{rid}")
+def delete_work_record(rid: int):
+    return af.delete_work_record(rid)
+
+
+# ---- 知识库②：任务条件 ----
+class TaskConditionIn(BaseModel):
+    company_id: int | None = None
+    keywords: str
+    conditions: str
+
+
+@app.get("/api/conditions/{company_id}")
+def get_task_conditions(company_id: int):
+    return {"conditions": af.get_task_conditions(company_id)}
+
+
+@app.post("/api/conditions")
+def add_task_condition(body: TaskConditionIn):
+    return af.add_task_condition(body.company_id, body.keywords, body.conditions)
+
+
+@app.delete("/api/conditions/{cid}")
+def delete_task_condition(cid: int):
+    return af.delete_task_condition(cid)
+
+
+# ---- 通知 ----
+@app.get("/api/notifications/{uid}")
+def get_notifications(uid: int):
+    return {"notifications": af.get_notifications(uid)}
+
+
+@app.post("/api/notifications/{uid}/read")
+def read_notifications(uid: int):
+    return af.mark_notifications_read(uid)
+
+
+# ---- 群聊 ----
+class CreateGroupIn(BaseModel):
+    name: str
+    member_ids: list[int]
+
+
+class AddMemberIn(BaseModel):
+    user_id: int
+
+
+@app.post("/api/chats/group")
+def create_group(body: CreateGroupIn):
+    """几人一起建群（member_ids 需包含创建者）"""
+    if not body.member_ids:
+        return {"ok": False, "msg": "请至少选择一位成员"}
+    cid = chat.create_chat("group", body.name, tuple(body.member_ids))
+    return {"ok": True, "chat_id": cid}
+
+
+@app.get("/api/chats/{cid}/members")
+def chat_members(cid: int):
+    return {"members": chat.get_chat_members(cid), "chat": chat.get_chat_info(cid)}
+
+
+@app.post("/api/chats/{cid}/members")
+def add_member(cid: int, body: AddMemberIn):
+    """经理强拉人进群"""
+    return chat.add_chat_member(cid, body.user_id)
 
 
 @app.post("/api/submissions/image")

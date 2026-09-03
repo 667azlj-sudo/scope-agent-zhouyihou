@@ -51,6 +51,12 @@
             <span>工时 {{ t.estimated_hours }}h</span>
             <span class="wage">报价 ¥{{ t.estimated_wage }}</span>
           </div>
+          <div v-if="t.suitability" class="estimate-line">
+            <span class="suit">适配度 · {{ t.suitability }}</span>
+          </div>
+          <p v-if="t.suitability_reason" class="reason">{{ t.suitability_reason }}</p>
+          <p v-if="t.conditions" class="reason cond">条件：{{ t.conditions }}</p>
+          <p v-if="t.needs_conditions" class="reason need">条件库暂无记录（已通知你补充）</p>
           <p v-if="t.estimate_reason" class="reason">{{ t.estimate_reason }}</p>
         </div>
         <div class="item-actions">
@@ -143,5 +149,8 @@ onMounted(loadAll)
 .estimate-line { display: flex; gap: 12px; margin-top: 6px; font-size: 13px; }
 .estimate-line .wage { color: var(--brand); font-weight: 600; }
 .reason { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+.reason.cond { color: var(--brand); }
+.reason.need { color: #b7791f; }
+.suit { color: #2e9e5b; font-weight: 600; }
 .empty { color: var(--muted); text-align: center; padding: 16px 0; }
 </style>

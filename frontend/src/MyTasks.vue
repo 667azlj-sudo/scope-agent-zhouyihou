@@ -28,6 +28,17 @@
           <el-input v-model="records" type="textarea" :rows="4" placeholder="例如：5 年后端经验，擅长 Python/FastAPI，日均产出 3 个接口…" />
           <el-button class="records-save" type="primary" size="small" :loading="savingRecords" @click="saveMyRecords">保存</el-button>
         </el-collapse-item>
+        <el-collapse-item title="工作记录（Agent 判断任务是否适合你）" name="work">
+          <p class="records-hint">导入你的工作记录，Agent 会据此判断任务适配度。</p>
+          <div class="work-add">
+            <el-input v-model="newWorkRecord" type="textarea" :rows="2" placeholder="例如：本周完成订单系统重构，熟练使用 Python 与 Redis" />
+            <el-button type="primary" size="small" @click="addMyWorkRecord">添加</el-button>
+          </div>
+          <div v-for="w in workRecords" :key="w.id" class="work-item">
+            <span class="work-text">{{ w.content }}</span>
+            <span class="work-del" @click="removeWorkRecord(w.id)">×</span>
+          </div>
+        </el-collapse-item>
       </el-collapse>
 
       <div class="list-title">我的任务</div>
@@ -51,7 +62,10 @@
 
         <!-- 报价已提交，等待经理审核 -->
         <div v-else-if="t.status === 'estimated'" class="feedback warn">
-          已报价：工时 {{ t.estimated_hours }}h · ¥{{ t.estimated_wage }}，等待负责人审核
+          <div>已报价：工时 {{ t.estimated_hours }}h · ¥{{ t.estimated_wage }}</div>
+          <div v-if="t.suitability" class="suit">适配度：{{ t.suitability }}{{ t.suitability_reason ? ' · ' + t.suitability_reason : '' }}</div>
+          <div v-if="t.conditions" class="suit">任务条件：{{ t.conditions }}</div>
+          <div v-if="t.needs_conditions" class="suit need">条件库暂无此任务条件，已通知负责人补充</div>
         </div>
 
         <!-- 进行中 / 已打回：提交成果 -->
@@ -90,7 +104,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord } from "./api.js"
 import { statusLabel, difficultyLabel, money } from "./format.js"
 import { ElMessage } from "element-plus"
 
@@ -98,6 +112,7 @@ const props = defineProps(["user"])
 const agent = ref(null), tasks = ref([]), salary = ref({ base_salary: 0, exempt: 0 })
 const drafts = reactive({}), estimating = reactive({}), images = reactive({})
 const records = ref(""), recordsOpen = ref([]), savingRecords = ref(false)
+const workRecords = ref([]), newWorkRecord = ref("")
 const imgInput = ref(null), currentUploadTaskId = ref(null)
 
 const totalEarned = computed(() =>
@@ -114,6 +129,29 @@ async function load() {
   tasks.value = t.tasks || []
   salary.value = s
   records.value = rec.content || ""
+  await loadWorkRecords()
+}
+
+async function loadWorkRecords() {
+  try { workRecords.value = (await getWorkRecords(props.user.id)).records || [] } catch (e) { /* 忽略 */ }
+}
+
+async function addMyWorkRecord() {
+  const c = newWorkRecord.value.trim()
+  if (!c) { ElMessage.warning("请填写工作记录内容"); return }
+  try {
+    await addWorkRecord(props.user.id, c)
+    newWorkRecord.value = ""
+    await loadWorkRecords()
+    ElMessage.success("已添加工作记录")
+  } catch (e) {
+    ElMessage.error("添加失败：" + (e.message || "请重试"))
+  }
+}
+
+async function removeWorkRecord(rid) {
+  await deleteWorkRecord(rid)
+  await loadWorkRecords()
 }
 
 async function saveMyRecords() {
@@ -198,6 +236,14 @@ onMounted(load)
 .records { margin-bottom: 16px; background: #fff; border: 1px solid var(--line); border-radius: 14px; }
 .records-hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
 .records-save { margin-top: 8px; }
+.work-add { display: flex; gap: 8px; align-items: flex-start; }
+.work-add .el-textarea { flex: 1; }
+.work-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.work-item:last-child { border-bottom: none; }
+.work-text { flex: 1; color: #4b5158; }
+.work-del { color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 4px; }
+.suit { font-size: 12px; margin-top: 4px; color: #6b7280; }
+.suit.need { color: #b7791f; }
 
 .list-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
 .task-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; }

@@ -71,6 +71,10 @@ def init_chat_db():
         conn.execute("ALTER TABLE messages ADD COLUMN lat REAL")
     if "lng" not in mcols:
         conn.execute("ALTER TABLE messages ADD COLUMN lng REAL")
+    # 兼容：chats 增加 company_id（总公司群用）
+    ccols = [r["name"] for r in conn.execute("PRAGMA table_info(chats)").fetchall()]
+    if "company_id" not in ccols:
+        conn.execute("ALTER TABLE chats ADD COLUMN company_id INTEGER")
     conn.commit()
     conn.close()
 
@@ -89,6 +93,57 @@ def create_chat(chat_type, name=None, member_ids=(1, 2)):
     conn.commit()
     conn.close()
     return chat_id
+
+
+def create_company_chat(company_id, name="总公司群"):
+    """创建公司唯一的基础群聊（type='company'），返回 chat_id。"""
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO chats (type, name, company_id) VALUES ('company', ?, ?)", (name, company_id))
+    chat_id = cur.lastrowid
+    conn.commit()
+    conn.close()
+    return chat_id
+
+
+def get_company_chat(company_id):
+    """查公司的总公司群，返回 dict 或 None。"""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM chats WHERE type='company' AND company_id=?", (company_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def add_chat_member(chat_id, user_id):
+    """把某人拉进群聊（经理强拉人）。已存在则忽略。"""
+    conn = get_conn()
+    exists = conn.execute(
+        "SELECT id FROM chat_members WHERE chat_id=? AND user_id=?", (chat_id, user_id)).fetchone()
+    if not exists:
+        conn.execute("INSERT INTO chat_members (chat_id, user_id) VALUES (?,?)", (chat_id, user_id))
+        conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+def get_chat_members(chat_id):
+    """群聊成员列表（含名字/岗位）。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT u.id, u.name, u.role, u.position FROM chat_members cm "
+        "JOIN users u ON u.id = cm.user_id WHERE cm.chat_id=? ORDER BY u.id",
+        (chat_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_chat_info(chat_id):
+    """单个会话信息。"""
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM chats WHERE id=?", (chat_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
 
 
 def send_message(chat_id, sender_id, content, msg_type="text", lat=None, lng=None):

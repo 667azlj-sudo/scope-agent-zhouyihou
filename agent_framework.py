@@ -99,12 +99,38 @@ def init_agent_db():
         content TEXT DEFAULT '',
         updated_at TEXT DEFAULT (datetime('now', 'localtime'))
     );
+
+    CREATE TABLE IF NOT EXISTS work_records (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS task_conditions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        company_id INTEGER,
+        keywords TEXT DEFAULT '',
+        conditions TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        task_id INTEGER,
+        is_read INTEGER DEFAULT 0,
+        created_at TEXT DEFAULT (datetime('now', 'localtime'))
+    );
     """)
     conn.commit()
     # 迁移：agent_tasks 增加报价相关列
     cols = [r["name"] for r in conn.execute("PRAGMA table_info(agent_tasks)").fetchall()]
     for col, typ in [("estimated_hours", "REAL"), ("estimated_wage", "REAL"),
-                     ("estimate_reason", "TEXT"), ("agreed_wage", "REAL")]:
+                     ("estimate_reason", "TEXT"), ("agreed_wage", "REAL"),
+                     ("suitability", "TEXT"), ("suitability_reason", "TEXT"),
+                     ("conditions", "TEXT"), ("needs_conditions", "INTEGER")]:
         if col not in cols:
             conn.execute(f"ALTER TABLE agent_tasks ADD COLUMN {col} {typ}")
     # 迁移：submissions 增加 images 列（照片凭证）
@@ -397,40 +423,153 @@ def save_user_records(user_id, content):
 
 
 # ---------------------------------------------------------------------------
+# 知识库①：工作记录（员工导入，供 Agent 分析任务适配度）
+# ---------------------------------------------------------------------------
+def add_work_record(user_id, content):
+    content = (content or "").strip()
+    if not content:
+        return {"ok": False, "msg": "工作记录内容为空"}
+    conn = get_conn()
+    cur = conn.execute("INSERT INTO work_records (user_id, content) VALUES (?,?)", (user_id, content))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": cur.lastrowid}
+
+
+def get_work_records(user_id):
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM work_records WHERE user_id=? ORDER BY id DESC", (user_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_work_record(record_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM work_records WHERE id=?", (record_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# 知识库②：任务条件（公司级，经理维护；员工 Agent 查询，缺失则通知经理）
+# ---------------------------------------------------------------------------
+def add_task_condition(company_id, keywords, conditions):
+    conn = get_conn()
+    cur = conn.execute(
+        "INSERT INTO task_conditions (company_id, keywords, conditions) VALUES (?,?,?)",
+        (company_id, (keywords or "").strip(), (conditions or "").strip()),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": cur.lastrowid}
+
+
+def get_task_conditions(company_id):
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT * FROM task_conditions WHERE company_id=? OR company_id IS NULL ORDER BY id DESC",
+        (company_id,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_task_condition(cond_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM task_conditions WHERE id=?", (cond_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+def query_task_conditions(task_title, task_detail, company_id):
+    """员工 Agent 向总 Agent 查询任务条件：关键词匹配任务条件库，返回匹配的条件文本列表。"""
+    conds = get_task_conditions(company_id)
+    text = (task_title or "") + " " + (task_detail or "")
+    matched = []
+    for c in conds:
+        kws = [k.strip() for k in (c.get("keywords") or "").replace("，", ",").split(",") if k.strip()]
+        if kws and any(k in text for k in kws):
+            matched.append(c.get("conditions") or "")
+    return matched
+
+
+# ---------------------------------------------------------------------------
+# 通知（总 Agent 向经理发信息）
+# ---------------------------------------------------------------------------
+def create_notification(user_id, content, task_id=None):
+    conn = get_conn()
+    cur = conn.execute("INSERT INTO notifications (user_id, content, task_id) VALUES (?,?,?)",
+                       (user_id, content, task_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": cur.lastrowid}
+
+
+def get_notifications(user_id, unread_only=False):
+    conn = get_conn()
+    sql = "SELECT * FROM notifications WHERE user_id=?"
+    if unread_only:
+        sql += " AND is_read=0"
+    rows = conn.execute(sql + " ORDER BY id DESC", (user_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_notifications_read(user_id):
+    conn = get_conn()
+    conn.execute("UPDATE notifications SET is_read=1 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # 员工 agent 报价 + 经理审核报价
 # ---------------------------------------------------------------------------
-def _estimate_with_llm(task, records_content, base_salary):
-    """让 LLM 结合任务 + 本地记录估算工时与报价工资，返回 (hours, wage, reason)。"""
+def _estimate_with_llm(task, context, base_salary):
+    """让 LLM 结合任务 + 员工记录，给出工时/报价/适配度。返回 dict。
+
+    context = 员工本地记录 + 工作记录拼接。
+    """
     try:
         from llm import chat as llm_chat
         system = (
-            "你是一名员工专属 Agent 的报价助手。根据任务要求和员工的本地记录，"
-            "估算完成该任务所需的工时（小时）和合理报价工资（元）。"
-            "只返回 JSON：{\"hours\": 数字, \"wage\": 数字, \"reason\": \"一句话理由\"}，不要输出多余文字。"
+            "你是员工专属 Agent 的报价助手。根据任务要求、员工的本地记录和工作记录，"
+            "完成三件事：1) 判断这个任务适不适合该员工做（适合/勉强/不适合）；"
+            "2) 估算完成该任务所需工时（小时，数字）；3) 估算合理报价工资（元，数字）。"
+            "只返回 JSON：{\"hours\":数字, \"wage\":数字, \"reason\":\"报价理由\", "
+            "\"suitability\":\"适合/勉强/不适合\", \"suitability_reason\":\"适配判断理由\"}，不要输出多余文字。"
         )
         user = (
             f"任务标题：{task['title']}\n任务要求：{task.get('detail') or ''}\n"
-            f"员工本地记录：{records_content or '（暂无）'}"
+            f"员工记录：{context or '（暂无）'}"
         )
         resp = llm_chat([{"role": "system", "content": system}, {"role": "user", "content": user}])
         data = _extract_json(getattr(resp, "content", None))
         if isinstance(data, dict):
             hours = float(data.get("hours", 0) or 0)
             wage = float(data.get("wage", 0) or 0)
-            reason = str(data.get("reason", ""))
             if hours > 0 and wage > 0:
-                return hours, wage, reason
+                return {
+                    "hours": hours, "wage": wage,
+                    "reason": str(data.get("reason", "")),
+                    "suitability": str(data.get("suitability", "适合") or "适合"),
+                    "suitability_reason": str(data.get("suitability_reason", "")),
+                }
     except Exception as e:  # noqa: BLE001
         print(f"[estimate] LLM 报价失败，走兜底公式：{e}")
-    # 兜底：按难度系数定价，工时按难度估一个合理值
     difficulty = float(task.get("difficulty") or 0.5)
     hours = round(2 + difficulty * 16, 1)
     wage = price_task(base_salary, difficulty)
-    return hours, wage, "按基础工资与难度系数估算"
+    return {"hours": hours, "wage": wage, "reason": "按基础工资与难度系数估算",
+            "suitability": "适合", "suitability_reason": "按难度系数估算"}
 
 
 def estimate_task(agent_id, task_id):
-    """员工 agent 审核任务并报价：结合本地记录给出工时 + 工资，状态 -> estimated。"""
+    """员工 agent 审核任务并报价：结合本地记录+工作记录给出适配度、工时、工资，
+    并向总 Agent 查询任务条件（缺失则通知经理）。状态 -> estimated。"""
     conn = get_conn()
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
     agent = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
@@ -439,20 +578,43 @@ def estimate_task(agent_id, task_id):
         return {"ok": False, "msg": "任务或 Agent 不存在"}
     task = dict(task)
     agent = dict(agent)
-    records = get_user_records(agent["user_id"])
+
+    # 知识库①：本地记录 + 工作记录 → 适配度 & 报价
+    profile = get_user_records(agent["user_id"])["content"]
+    works = "；".join(r["content"] for r in get_work_records(agent["user_id"]))
+    context = f"本地记录：{profile or '无'}\n工作记录：{works or '无'}"
     salary = get_salary(agent["user_id"])
     base = float(salary["base_salary"] or 6000)
-    hours, wage, reason = _estimate_with_llm(task, records["content"], base)
+    est = _estimate_with_llm(task, context, base)
 
+    # 知识库②：向总 Agent 查询任务条件
     conn = get_conn()
+    urow = conn.execute("SELECT company_id FROM users WHERE id=?", (agent["user_id"],)).fetchone()
+    company_id = dict(urow)["company_id"] if urow else None
+    matched = query_task_conditions(task["title"], task.get("detail") or "", company_id)
+    conditions_text = "\n".join(matched) if matched else ""
+    needs = 1 if not matched else 0
+
     conn.execute(
         "UPDATE agent_tasks SET estimated_hours=?, estimated_wage=?, estimate_reason=?, "
-        "status='estimated' WHERE id=?",
-        (hours, wage, reason, task_id),
+        "suitability=?, suitability_reason=?, conditions=?, needs_conditions=?, status='estimated' WHERE id=?",
+        (est["hours"], est["wage"], est["reason"], est["suitability"], est["suitability_reason"],
+         conditions_text, needs, task_id),
     )
+    # 缺失条件 → 通知经理补充
+    if needs:
+        mgr = conn.execute("SELECT manager_id FROM companies WHERE id=?", (company_id,)).fetchone()
+        if mgr and mgr["manager_id"]:
+            create_notification(mgr["manager_id"],
+                                f"员工 Agent 请求任务「{task['title']}」的完成条件，条件库暂无记录，请补充。",
+                                task_id)
     conn.commit()
     conn.close()
-    return {"ok": True, "task_id": task_id, "hours": hours, "wage": wage, "reason": reason}
+
+    return {"ok": True, "task_id": task_id, "hours": est["hours"], "wage": est["wage"],
+            "reason": est["reason"], "suitability": est["suitability"],
+            "suitability_reason": est["suitability_reason"],
+            "conditions": conditions_text, "needs_conditions": needs}
 
 
 def review_estimate(task_id, approve):

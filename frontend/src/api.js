@@ -52,6 +52,25 @@ export const reviewEstimate = (taskId, approve) => api(`/api/tasks/${taskId}/rev
 export const getRecords = (uid) => api(`/api/records/${uid}`)
 export const saveRecords = (uid, content) => api(`/api/records/${uid}`, "POST", { content })
 export const getCompany = (cid) => api(`/api/companies/${cid}`)
+
+// 知识库① 工作记录
+export const getWorkRecords = (uid) => api(`/api/records/work/${uid}`)
+export const addWorkRecord = (uid, content) => api(`/api/records/work/${uid}`, "POST", { content })
+export const deleteWorkRecord = (rid) => api(`/api/records/work/${rid}`, "DELETE", {})
+
+// 知识库② 任务条件
+export const getTaskConditions = (companyId) => api(`/api/conditions/${companyId}`)
+export const addTaskCondition = (companyId, keywords, conditions) => api("/api/conditions", "POST", { company_id: companyId, keywords, conditions })
+export const deleteTaskCondition = (cid) => api(`/api/conditions/${cid}`, "DELETE", {})
+
+// 通知
+export const getNotifications = (uid) => api(`/api/notifications/${uid}`)
+export const readNotifications = (uid) => api(`/api/notifications/${uid}/read`, "POST", {})
+
+// 群聊
+export const createGroup = (name, memberIds) => api("/api/chats/group", "POST", { name, member_ids: memberIds })
+export const getChatMembers = (cid) => api(`/api/chats/${cid}/members`)
+export const addChatMember = (cid, userId) => api(`/api/chats/${cid}/members`, "POST", { user_id: userId })
 export const submitWork = (taskId, agentId, content, images) => api("/api/submissions/submit", "POST", { task_id: taskId, agent_id: agentId, content, images: images || [] })
 export const markChatRead = (cid, token) => api(`/api/chats/${cid}/read`, "POST", { token })
 export function uploadSubmissionImage(file) {
