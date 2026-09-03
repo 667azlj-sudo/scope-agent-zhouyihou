@@ -39,9 +39,12 @@
 
       <el-collapse v-model="recordsOpen" class="records">
         <el-collapse-item title="我的本地记录（Agent 报价依据）" name="rec">
-          <p class="records-hint">写清你的技能、经验、历史产出，Agent 会据此为你报价。</p>
+          <p class="records-hint">写清你的技能、经验、历史产出，Agent 会据此为你报价；也可上传文档（如简历）自动填入。</p>
           <el-input v-model="records" type="textarea" :rows="4" placeholder="例如：5 年后端经验，擅长 Python/FastAPI，日均产出 3 个接口…" />
-          <el-button class="records-save" type="primary" size="small" :loading="savingRecords" @click="saveMyRecords">保存</el-button>
+          <div class="rec-actions">
+            <el-button size="small" @click="pickRecordsFile">📄 上传文档</el-button>
+            <el-button class="records-save" type="primary" size="small" :loading="savingRecords" @click="saveMyRecords">保存</el-button>
+          </div>
         </el-collapse-item>
         <el-collapse-item title="工作记录（Agent 判断任务是否适合你）" name="work">
           <p class="records-hint">记录来源：手动添加 / 上传文档 / 导入聊天记录 / 让 Agent 读取电脑。</p>
@@ -124,12 +127,13 @@
     <input ref="imgInput" type="file" accept="image/*" multiple hidden @change="onPickImage" />
     <input ref="workFileInput" type="file" hidden @change="onWorkFile" />
     <input ref="abilityFileInput" type="file" webkitdirectory multiple hidden @change="onAbilityFiles" />
+    <input ref="recordsFileInput" type="file" hidden @change="onRecordsFile" />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask, uploadWorkRecordFile, importWorkRecordsFromChats, uploadAbilityFiles, getAbilityStats } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask, uploadWorkRecordFile, importWorkRecordsFromChats, uploadAbilityFiles, getAbilityStats, uploadTaskFile } from "./api.js"
 import { statusLabel, difficultyLabel, money } from "./format.js"
 import { ElMessage } from "element-plus"
 
@@ -139,7 +143,7 @@ const hallTasks = ref([])
 const drafts = reactive({}), estimating = reactive({}), images = reactive({})
 const records = ref(""), recordsOpen = ref([]), savingRecords = ref(false)
 const workRecords = ref([]), newWorkRecord = ref("")
-const imgInput = ref(null), currentUploadTaskId = ref(null), workFileInput = ref(null), abilityFileInput = ref(null)
+const imgInput = ref(null), currentUploadTaskId = ref(null), workFileInput = ref(null), abilityFileInput = ref(null), recordsFileInput = ref(null)
 const abilityCount = ref(0)
 
 const totalEarned = computed(() =>
@@ -257,6 +261,27 @@ async function saveMyRecords() {
   }
 }
 
+function pickRecordsFile() {
+  if (recordsFileInput.value) recordsFileInput.value.click()
+}
+
+async function onRecordsFile(e) {
+  const f = e.target.files[0]
+  if (!f) { e.target.value = ""; return }
+  try {
+    const r = await uploadTaskFile(f)
+    if (r.ok && r.text) {
+      records.value = records.value ? records.value + "\n" + r.text : r.text
+      ElMessage.success("已填入本地记录，请检查后保存")
+    } else {
+      ElMessage.error("解析失败，请换文本类文件")
+    }
+  } catch (err) {
+    ElMessage.error("上传失败：" + (err.message || "请重试"))
+  }
+  e.target.value = ""
+}
+
 async function doEstimate(t) {
   estimating[t.id] = true
   try {
@@ -327,6 +352,8 @@ onMounted(load)
 .records { margin-bottom: 16px; background: #fff; border: 1px solid var(--line); border-radius: 14px; }
 .records-hint { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
 .records-save { margin-top: 8px; }
+.rec-actions { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.rec-actions .records-save { margin-top: 0; }
 .work-add { display: flex; gap: 8px; align-items: flex-start; }
 .work-add .el-textarea { flex: 1; }
 .work-source { display: flex; gap: 8px; margin: 8px 0; align-items: center; }
