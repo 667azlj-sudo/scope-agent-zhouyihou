@@ -130,7 +130,8 @@ def init_agent_db():
     for col, typ in [("estimated_hours", "REAL"), ("estimated_wage", "REAL"),
                      ("estimate_reason", "TEXT"), ("agreed_wage", "REAL"),
                      ("suitability", "TEXT"), ("suitability_reason", "TEXT"),
-                     ("conditions", "TEXT"), ("needs_conditions", "INTEGER")]:
+                     ("conditions", "TEXT"), ("needs_conditions", "INTEGER"),
+                     ("candidates", "TEXT")]:
         if col not in cols:
             conn.execute(f"ALTER TABLE agent_tasks ADD COLUMN {col} {typ}")
     # 迁移：submissions 增加 images 列（照片凭证）
@@ -313,9 +314,8 @@ def get_pending_classification():
 def manager_choose(task_id, choice):
     """经理对某个待确认子任务做分级选择。
 
-    choice='internal'：判定为机密 → 内部分配，status 置为 'internal'；
-    choice='outsource'：判定为一般 → 外包候选，status 置为 'outsource'。
-    返回结果 dict。
+    choice='internal'：机密 → 内部分配；随后查知识库判断是否有人能接手，无人则标 unmatched。
+    choice='outsource'：一般 → 外包候选。
     """
     if choice not in ("internal", "outsource"):
         return {"ok": False, "msg": "choice 只能是 internal 或 outsource"}
@@ -331,9 +331,163 @@ def manager_choose(task_id, choice):
     conn.execute("UPDATE agent_tasks SET status=? WHERE id=?", (new_status, task_id))
     conn.commit()
     conn.close()
-    return {"ok": True, "task_id": task_id, "choice": choice,
-            "status": new_status,
+
+    resp = {"ok": True, "task_id": task_id, "choice": choice, "status": new_status,
             "msg": "已内部分配（机密）" if choice == "internal" else "已列为外包候选（一般）"}
+
+    # 内部任务：查知识库判断是否有人能接手，无人则标记 unmatched
+    if choice == "internal":
+        det = detect_unmatched(task_id)
+        resp["unmatched"] = det.get("unmatched", False)
+        resp["detect_reason"] = det.get("reason", "")
+        if det.get("unmatched"):
+            _c = get_conn()
+            _c.execute("UPDATE agent_tasks SET status='unmatched' WHERE id=?", (task_id,))
+            _c.commit()
+            _c.close()
+            resp["status"] = "unmatched"
+            resp["msg"] = "无人接手，请选择候选人"
+    return resp
+
+
+def _task_company_id(task):
+    """通过任务挂的经理 agent 找到公司 id。"""
+    conn = get_conn()
+    mid = task.get("manager_agent")
+    row = None
+    if mid:
+        row = conn.execute(
+            "SELECT u.company_id FROM agents a JOIN users u ON u.id=a.user_id WHERE a.id=?",
+            (mid,)).fetchone()
+    conn.close()
+    return dict(row)["company_id"] if row and row["company_id"] else None
+
+
+def _company_employees(company_id):
+    """公司内所有员工 agent（含各自工作记录 + 本地记录），供适配判断。"""
+    if not company_id:
+        return []
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT u.id AS user_id, u.name, a.id AS agent_id FROM users u "
+        "JOIN agents a ON a.user_id=u.id WHERE u.company_id=? AND u.role='employee'",
+        (company_id,)).fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        r = dict(r)
+        profile = get_user_records(r["user_id"])["content"]
+        works = "；".join(x["content"] for x in get_work_records(r["user_id"]))
+        out.append({"user_id": r["user_id"], "agent_id": r["agent_id"],
+                    "name": r["name"], "records": f"{profile} {works}".strip()})
+    return out
+
+
+def detect_unmatched(task_id):
+    """查知识库判断是否有员工适合接手该任务；无人则返回 unmatched=True。"""
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    conn.close()
+    if not task:
+        return {"ok": False, "msg": "任务不存在"}
+    task = dict(task)
+    employees = _company_employees(_task_company_id(task))
+    if not employees:
+        return {"ok": True, "unmatched": True, "reason": "公司暂无员工记录可匹配"}
+
+    text = f"{task['title']} {task.get('detail') or ''}"
+    try:
+        from llm import chat as llm_chat
+        emp_text = "\n".join(f"- {e['name']}：{e['records'] or '（无记录）'}" for e in employees)
+        system = ("你是任务适配判断助手。根据任务要求和各员工的工作记录，判断是否有员工适合接手该任务。"
+                  "只返回 JSON：{\"matched\": true 或 false, \"reason\": \"一句话\"}，不要输出多余文字。")
+        resp = llm_chat([{"role": "system", "content": system},
+                         {"role": "user", "content": f"任务：{text}\n员工记录：\n{emp_text}"}])
+        data = _extract_json(getattr(resp, "content", None))
+        if isinstance(data, dict) and "matched" in data:
+            return {"ok": True, "unmatched": not bool(data["matched"]),
+                    "reason": str(data.get("reason", ""))}
+    except Exception as e:  # noqa: BLE001
+        print(f"[detect] LLM 适配判断失败，走关键词兜底：{e}")
+    # 兜底：关键词命中任一员工记录即视为有人能接手
+    try:
+        import jieba
+        kws = [w for w in jieba.lcut(text) if len(w.strip()) >= 2]
+    except Exception:  # noqa: BLE001
+        kws = text.split()
+    for e in employees:
+        if e["records"] and any(k in e["records"] for k in kws):
+            return {"ok": True, "unmatched": False, "reason": f"候选：{e['name']}"}
+    return {"ok": True, "unmatched": True, "reason": "没有员工的工作记录与任务匹配"}
+
+
+def get_unmatched_tasks():
+    """经理端：无人接手的任务列表。"""
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM agent_tasks WHERE status='unmatched' ORDER BY id DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def publish_to_hall(task_id, candidate_ids):
+    """经理选候选人后，把无人接手的任务发布到任务大厅。"""
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    if not task:
+        conn.close()
+        return {"ok": False, "msg": "任务不存在"}
+    if task["status"] != "unmatched":
+        conn.close()
+        return {"ok": False, "msg": "任务不在「无人接手」状态"}
+    conn.execute("UPDATE agent_tasks SET status='hall', candidates=? WHERE id=?",
+                 (json.dumps(list(candidate_ids or [])), task_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "task_id": task_id, "status": "hall"}
+
+
+def get_hall_tasks(user_id):
+    """任务大厅：返回该用户作为候选人的待接取任务。"""
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM agent_tasks WHERE status='hall' ORDER BY id DESC").fetchall()
+    conn.close()
+    out = []
+    for r in rows:
+        d = dict(r)
+        try:
+            cands = json.loads(d.get("candidates") or "[]")
+        except Exception:  # noqa: BLE001
+            cands = []
+        if user_id in cands:
+            d["candidates"] = cands
+            out.append(d)
+    return out
+
+
+def claim_task(task_id, user_id):
+    """候选人接取大厅任务 → 分发给自己 agent，进入报价流程。"""
+    conn = get_conn()
+    task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+    if not task or task["status"] != "hall":
+        conn.close()
+        return {"ok": False, "msg": "任务不在大厅待接取状态"}
+    task = dict(task)
+    try:
+        cands = json.loads(task.get("candidates") or "[]")
+    except Exception:  # noqa: BLE001
+        cands = []
+    if user_id not in cands:
+        conn.close()
+        return {"ok": False, "msg": "你不是该任务的候选人"}
+    agent = get_agent_by_user(user_id)
+    if not agent:
+        conn.close()
+        return {"ok": False, "msg": "你没有专属 Agent"}
+    conn.execute("UPDATE agent_tasks SET status='distributed', assignee_agent=?, candidates='[]' WHERE id=?",
+                 (agent["id"], task_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "task_id": task_id, "agent_id": agent["id"], "status": "distributed"}
 
 
 def add_task(title, detail="", difficulty=0.5, manager_agent_id=None):

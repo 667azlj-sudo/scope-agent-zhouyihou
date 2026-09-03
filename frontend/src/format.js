@@ -4,6 +4,8 @@ export const taskStatus = {
   pending_classify: "待分级",
   internal: "待分发",
   outsource: "外包候选",
+  unmatched: "无人接手",
+  hall: "任务大厅待接取",
   distributed: "待报价",
   estimated: "待审核报价",
   assigned: "进行中",

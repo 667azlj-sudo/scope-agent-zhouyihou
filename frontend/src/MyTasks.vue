@@ -1,5 +1,20 @@
 <template>
   <div class="my-tasks">
+    <!-- 任务大厅：仅候选人可见，等待接取 -->
+    <section v-if="hallTasks.length" class="hall">
+      <div class="list-title">任务大厅</div>
+      <div v-for="t in hallTasks" :key="t.id" class="task-card hall-card">
+        <div class="task-head">
+          <span class="task-title">{{ t.title }}</span>
+          <span class="tag normal">{{ t.classification }}</span>
+        </div>
+        <p v-if="t.detail" class="task-detail">{{ t.detail }}</p>
+        <div class="action">
+          <el-button type="primary" size="small" @click="claimHall(t)">接取任务</el-button>
+        </div>
+      </div>
+    </section>
+
     <div v-if="!agent" class="empty">
       <div class="empty-icon">🤖</div>
       <div class="empty-title">还没有绑定 Agent</div>
@@ -104,12 +119,13 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord } from "./api.js"
+import { getAgentByUser, getMyTasks, getSalary, submitWork, estimateTask, getRecords, saveRecords, uploadSubmissionImage, getWorkRecords, addWorkRecord, deleteWorkRecord, getHallTasks, claimTask } from "./api.js"
 import { statusLabel, difficultyLabel, money } from "./format.js"
 import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
 const agent = ref(null), tasks = ref([]), salary = ref({ base_salary: 0, exempt: 0 })
+const hallTasks = ref([])
 const drafts = reactive({}), estimating = reactive({}), images = reactive({})
 const records = ref(""), recordsOpen = ref([]), savingRecords = ref(false)
 const workRecords = ref([]), newWorkRecord = ref("")
@@ -122,6 +138,7 @@ const totalEarned = computed(() =>
 )
 
 async function load() {
+  await loadHall()
   const a = await getAgentByUser(props.user.id)
   agent.value = a || null
   if (!agent.value) return
@@ -130,6 +147,16 @@ async function load() {
   salary.value = s
   records.value = rec.content || ""
   await loadWorkRecords()
+}
+
+async function loadHall() {
+  try { hallTasks.value = (await getHallTasks(props.user.id)).tasks || [] } catch (e) { /* 忽略 */ }
+}
+
+async function claimHall(t) {
+  const r = await claimTask(t.id, props.user.id)
+  if (r.ok) { ElMessage.success("已接取，等待 Agent 报价"); await load() }
+  else ElMessage.error(r.msg || "接取失败")
 }
 
 async function loadWorkRecords() {
@@ -246,6 +273,8 @@ onMounted(load)
 .suit.need { color: #b7791f; }
 
 .list-title { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+.hall { margin-bottom: 16px; }
+.hall-card { border-color: #fcd34d; background: #fffbeb; }
 .task-card { background: #fff; border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin-bottom: 12px; }
 .task-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .task-title { font-size: 15px; font-weight: 600; }

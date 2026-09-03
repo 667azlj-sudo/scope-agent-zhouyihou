@@ -66,18 +66,36 @@
       </div>
       <p v-if="!estimates.length" class="empty">没有待审核的报价</p>
     </el-card>
+
+    <el-card shadow="never" class="card">
+      <h3>无人接手</h3>
+      <p class="hint">模型查知识库后没找到合适人选，请选择候选人并发布到任务大厅，等候选人接取。</p>
+      <div v-for="t in unmatched" :key="t.id" class="item">
+        <div class="item-main">
+          <span class="title">{{ t.title }}</span>
+        </div>
+        <div class="hall">
+          <el-select v-model="hallCandidates[t.id]" multiple collapse-tags placeholder="选候选人" size="small" style="min-width: 160px">
+            <el-option v-for="m in companyMembers" :key="m.id" :label="m.name" :value="m.id" />
+          </el-select>
+          <el-button size="small" type="primary" @click="publishHall(t)">发布大厅</el-button>
+        </div>
+      </div>
+      <p v-if="!unmatched.length" class="empty">没有无人接手的任务</p>
+    </el-card>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from "vue"
-import { splitTask, pendingClassify, classifyTask, getAgentByUser, listAgents, internalTasks, estimatedTasks, distributeTask, reviewEstimate } from "./api.js"
+import { splitTask, pendingClassify, classifyTask, getAgentByUser, listAgents, internalTasks, estimatedTasks, distributeTask, reviewEstimate, unmatchedTasks, publishToHall, getCompany } from "./api.js"
 import { ElMessage } from "element-plus"
 
 const props = defineProps(["user"])
 const title = ref(""), detail = ref(""), pendings = ref([]), loading = ref(false)
-const internals = ref([]), estimates = ref([]), agents = ref([])
-const distributeTarget = reactive({})
+const internals = ref([]), estimates = ref([]), agents = ref([]), unmatched = ref([])
+const distributeTarget = reactive({}), hallCandidates = reactive({})
+const companyMembers = ref([])
 const managerAgentId = ref(null)
 
 const employeeAgents = computed(() => agents.value.filter(a => a.role_type !== "manager"))
@@ -87,6 +105,13 @@ async function loadAll() {
   try { internals.value = (await internalTasks()).tasks || [] } catch (e) { /* 忽略 */ }
   try { estimates.value = (await estimatedTasks()).tasks || [] } catch (e) { /* 忽略 */ }
   try { agents.value = (await listAgents()).agents || [] } catch (e) { /* 忽略 */ }
+  try { unmatched.value = (await unmatchedTasks()).tasks || [] } catch (e) { /* 忽略 */ }
+  if (props.user.company_id) {
+    try {
+      const r = await getCompany(props.user.company_id)
+      if (r.ok) companyMembers.value = r.members || []
+    } catch (e) { /* 忽略 */ }
+  }
 }
 
 async function ensureManagerAgent() {
@@ -130,6 +155,14 @@ async function approveEstimate(t, ok) {
   await loadAll()
 }
 
+async function publishHall(t) {
+  const ids = hallCandidates[t.id] || []
+  if (!ids.length) { ElMessage.warning("请选择至少一位候选人"); return }
+  const r = await publishToHall(t.id, ids)
+  if (r.ok) { ElMessage.success("已发布到任务大厅"); await loadAll() }
+  else ElMessage.error(r.msg || "发布失败")
+}
+
 onMounted(loadAll)
 </script>
 
@@ -144,6 +177,7 @@ onMounted(loadAll)
 .item .title { flex: 1; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .item-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .distribute { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
+.hall { display: flex; gap: 6px; flex-shrink: 0; align-items: center; }
 .estimate { align-items: flex-start; }
 .estimate-main { flex: 1; min-width: 0; }
 .estimate-line { display: flex; gap: 12px; margin-top: 6px; font-size: 13px; }

@@ -539,6 +539,38 @@ def estimated_tasks():
     return {"tasks": af.get_estimated_tasks()}
 
 
+class PublishHallIn(BaseModel):
+    candidate_ids: list[int]
+
+
+class ClaimTaskIn(BaseModel):
+    user_id: int
+
+
+@app.get("/api/tasks/unmatched")
+def unmatched_tasks():
+    """经理端：无人接手的任务"""
+    return {"tasks": af.get_unmatched_tasks()}
+
+
+@app.post("/api/tasks/{tid}/publish-hall")
+def publish_hall(tid: int, body: PublishHallIn):
+    """经理选候选人后发布到任务大厅"""
+    return af.publish_to_hall(tid, body.candidate_ids)
+
+
+@app.get("/api/hall/{uid}")
+def hall_tasks(uid: int):
+    """任务大厅：该用户作为候选人的待接取任务"""
+    return {"tasks": af.get_hall_tasks(uid)}
+
+
+@app.post("/api/hall/{tid}/claim")
+def claim_task(tid: int, body: ClaimTaskIn):
+    """候选人接取大厅任务"""
+    return af.claim_task(tid, body.user_id)
+
+
 @app.get("/api/agents")
 def list_agents():
     """所有 Agent（附用户名/岗位/公司），经理分发时选择"""

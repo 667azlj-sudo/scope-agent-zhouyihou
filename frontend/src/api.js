@@ -53,6 +53,12 @@ export const getRecords = (uid) => api(`/api/records/${uid}`)
 export const saveRecords = (uid, content) => api(`/api/records/${uid}`, "POST", { content })
 export const getCompany = (cid) => api(`/api/companies/${cid}`)
 
+// 任务大厅
+export const unmatchedTasks = () => api("/api/tasks/unmatched")
+export const publishToHall = (taskId, candidateIds) => api(`/api/tasks/${taskId}/publish-hall`, "POST", { candidate_ids: candidateIds })
+export const getHallTasks = (uid) => api(`/api/hall/${uid}`)
+export const claimTask = (taskId, userId) => api(`/api/hall/${taskId}/claim`, "POST", { user_id: userId })
+
 // 知识库① 工作记录
 export const getWorkRecords = (uid) => api(`/api/records/work/${uid}`)
 export const addWorkRecord = (uid, content) => api(`/api/records/work/${uid}`, "POST", { content })
