@@ -160,6 +160,9 @@ export const getPayouts = () => api("/api/payouts")
 export const payPayout = (pid) => api(`/api/payouts/${pid}/pay`, "POST", {})
 export const getUserPayouts = (uid) => api(`/api/payouts/user/${uid}`)
 
+// 经理 Agent 运行（触发机密库访问审批）
+export const runAgent = (agentId, taskText) => api("/api/agent/run", "POST", { agent_id: agentId, task_text: taskText })
+
 // SaaS 套餐 / 订单 / 订阅
 export const getPlans = () => api("/api/plans")
 export const createOrder = (userId, planId) => api("/api/orders", "POST", { user_id: userId, plan_id: planId })

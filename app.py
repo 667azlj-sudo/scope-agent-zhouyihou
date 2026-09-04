@@ -991,6 +991,31 @@ def agent_chat(body: AgentChatIn, user: dict = Depends(_current_user)):
     return personal_rag.ask(user["id"], body.message)
 
 
+class RunAgentIn(BaseModel):
+    agent_id: int
+    task_text: str
+
+
+@app.post("/api/agent/run")
+def run_agent(body: RunAgentIn, user: dict = Depends(require_role("manager"))):
+    """经理手动触发自己的经理 Agent 跑一段任务（ReAct 循环，含机密库访问审批）。
+
+    仅经理可用；只能运行本公司、且角色为 manager 的 Agent。
+    """
+    agent = af.get_agent(body.agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent 不存在")
+    if agent.get("role_type") != "manager":
+        raise HTTPException(status_code=403, detail="只能运行经理 Agent")
+    if agent.get("user_id") != user["id"]:
+        raise HTTPException(status_code=403, detail="只能运行你自己的 Agent")
+    try:
+        messages = af.run_agent_loop(body.agent_id, body.task_text)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"ok": True, "messages": messages}
+
+
 # ---- 知识库②：任务条件 ----
 class TaskConditionIn(BaseModel):
     company_id: int | None = None

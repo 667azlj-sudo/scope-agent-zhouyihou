@@ -5,6 +5,17 @@
       <p class="sub">仅经理可维护。经理 Agent 访问前会提交申请，说明原因 / 用途 / 风险，你批准后才放行。</p>
     </div>
 
+    <!-- 运行经理 Agent（触发机密库访问申请） -->
+    <el-card shadow="never" class="panel">
+      <h3>运行经理 Agent</h3>
+      <p class="hint">让经理 Agent 处理一段任务。它若要访问机密库，会先提交申请（含原因/用途/风险），你批准后才拿到内容。</p>
+      <el-input v-model="agentTask" type="textarea" :rows="2" placeholder="例如：分析「用户登录模块」是否触及公司核心算法" />
+      <div class="upload-row">
+        <el-button type="primary" :loading="running" @click="doRunAgent">🤖 运行经理 Agent</el-button>
+      </div>
+      <div v-if="agentOutput" class="agent-output">{{ agentOutput }}</div>
+    </el-card>
+
     <!-- 上传本地机密文件 -->
     <el-card shadow="never" class="panel">
       <h3>上传本地机密文件</h3>
@@ -56,13 +67,14 @@
 
 <script setup>
 import { ref, computed, onMounted } from "vue"
-import { getSecretKb, deleteSecretKb, getSecretKbRequests, reviewSecretKbRequest, uploadSecretKb } from "./api.js"
+import { getSecretKb, deleteSecretKb, getSecretKbRequests, reviewSecretKbRequest, uploadSecretKb, runAgent } from "./api.js"
 import { ElMessage, ElMessageBox } from "element-plus"
 
 const props = defineProps(["user"])
 const entries = ref([]), requests = ref([])
 const selectedNames = ref([]), uploading = ref(false), showAll = ref(false)
 const fileInput = ref(null)
+const agentTask = ref(""), running = ref(false), agentOutput = ref("")
 
 const filteredReqs = computed(() => showAll.value ? requests.value : requests.value.filter(r => r.status === "pending"))
 
@@ -115,6 +127,30 @@ async function remove(id) {
   await load()
 }
 
+async function doRunAgent() {
+  const task = agentTask.value.trim()
+  if (!task) { ElMessage.warning("请输入要处理的任务"); return }
+  running.value = true
+  agentOutput.value = ""
+  try {
+    const r = await runAgent(props.user.id, task)
+    if (r.ok) {
+      // 提取最终 assistant 文本
+      const msgs = r.messages || []
+      const last = [...msgs].reverse().find(m => m.role === "assistant" && m.content)
+      agentOutput.value = last ? last.content : "（已运行，等待机密库审批）"
+      await load()
+      ElMessage.success("经理 Agent 已运行")
+    } else {
+      ElMessage.error(r.msg || "运行失败")
+    }
+  } catch (e) {
+    ElMessage.error("运行失败：" + (e.message || "请重试"))
+  } finally {
+    running.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -127,8 +163,9 @@ onMounted(load)
 .panel h3 { margin: 0 0 10px; font-size: 14px; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
 .hint { font-size: 12px; color: var(--muted); margin: 0 0 10px; }
-.upload-row { display: flex; align-items: center; gap: 10px; }
+.upload-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 .sel { font-size: 12px; color: var(--muted); }
+.agent-output { margin-top: 10px; font-size: 13px; color: #4b5158; white-space: pre-wrap; background: #f5f6f8; border-radius: 8px; padding: 10px; }
 .req-item { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .req-item:last-child { border-bottom: none; }
 .req-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }

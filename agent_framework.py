@@ -533,6 +533,17 @@ def _agent_company_id(agent):
     return dict(row)["company_id"] if row and row["company_id"] else None
 
 
+def _agents_same_company(agent_id_a, agent_id_b):
+    """判断两个 agent 是否属于同一公司。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT u.company_id FROM agents a JOIN users u ON u.id=a.user_id "
+        "WHERE a.id IN (?,?)", (agent_id_a, agent_id_b)).fetchall()
+    conn.close()
+    cids = {dict(r)["company_id"] for r in rows}
+    return len(cids) == 1 and None not in cids
+
+
 def record_pricing_decision(manager_user_id, task_title, difficulty, original, final):
     """把经理的定价决定写进经理 agent 的能力知识库（RAG），供后续定价参考。"""
     if not manager_user_id:
@@ -1037,17 +1048,18 @@ def search_secret_kb(company_id, query, top_k=5):
     """经理 Agent 检索本公司机密知识库（关键词匹配，返回片段列表）。
 
     注意：业务上不应直接调用此函数，应走 access_secret_kb()，先经经理审批。
+    空查询或无有效关键词时返回空列表，不隐式返回全库。
     """
     entries = get_secret_kb(company_id)
     if not query or not query.strip():
-        return entries[:top_k]
+        return []
     try:
         import jieba
         kws = [w for w in jieba.lcut(query) if len(w.strip()) >= 2]
     except Exception:  # noqa: BLE001
         kws = query.split()
     if not kws:
-        return entries[:top_k]
+        return []
     scored = []
     for e in entries:
         c = e["content"]
@@ -1060,10 +1072,18 @@ def search_secret_kb(company_id, query, top_k=5):
 
 # ---- 机密库访问审批：agent 必须先发起申请，经理批准后才能读 ----
 def request_secret_kb_access(agent_id, company_id, query, why, usage, danger):
-    """经理 Agent 发起机密库访问申请。返回申请记录（status=pending）。"""
+    """经理 Agent 发起机密库访问申请。返回申请记录（status=pending）。
+
+    三要素（为什么需要 / 项目用途 / 潜在危险）必填，缺一不可。
+    """
     query = (query or "").strip()
+    why = (why or "").strip()
+    usage = (usage or "").strip()
+    danger = (danger or "").strip()
     if not query:
         return {"ok": False, "msg": "检索内容为空"}
+    if not (why and usage and danger):
+        return {"ok": False, "msg": "必须说明为什么需要、项目用途与潜在危险"}
     if not company_id:
         return {"ok": False, "msg": "缺少公司归属"}
     conn = get_conn()
@@ -1071,8 +1091,7 @@ def request_secret_kb_access(agent_id, company_id, query, why, usage, danger):
         conn,
         "INSERT INTO secret_kb_requests (company_id, agent_id, query, why, usage, danger) "
         "VALUES (?,?,?,?,?,?)",
-        (company_id, agent_id, query,
-         (why or "").strip(), (usage or "").strip(), (danger or "").strip()),
+        (company_id, agent_id, query, why, usage, danger),
     )
     conn.commit()
     conn.close()
@@ -1143,7 +1162,7 @@ def access_secret_kb(agent_id, company_id, query, why, usage, danger):
         "SELECT id, grant_mode, grant_expires_at FROM secret_kb_requests "
         "WHERE company_id=? AND agent_id=? AND status='approved' AND ("
         "  (query=? AND grant_mode='once') OR "
-        "  (grant_mode='window' AND (grant_expires_at IS NULL OR grant_expires_at > ?))"
+        "  (grant_mode='window' AND grant_expires_at > ?)"
         ") ORDER BY id DESC LIMIT 1",
         (company_id, agent_id, query, now)).fetchone()
     conn.close()
@@ -2057,14 +2076,26 @@ def _execute_tool(name, args, agent, tools):
     if name == "query_db":
         return query_db(aid, args.get("sql", ""))
     if name == "message_agent":
-        return message_between(aid, args.get("to_agent"), args.get("content", ""),
+        to_agent = args.get("to_agent")
+        # 权责：只能给本公司 agent 发消息
+        if not to_agent or not _agents_same_company(aid, to_agent):
+            return {"error": "只能给本公司 Agent 发消息"}
+        return message_between(aid, to_agent, args.get("content", ""),
                                args.get("priority", 0))
     if name == "get_task":
         return get_task(aid)
     if name == "submit_work":
         return submit_work(args.get("task_id"), aid, args.get("content", ""))
     if name == "review":
-        return review_submission(args.get("submission_id"),
+        sid = args.get("submission_id")
+        # 权责：经理 agent 只能审本公司的提交
+        sub = get_submission(sid) if sid else None
+        if not sub:
+            return {"error": "提交不存在"}
+        task = get_agent_task(sub.get("task_id"))
+        if not task or _task_company_id(task) != _agent_company_id(agent):
+            return {"error": "只能审核本公司的提交"}
+        return review_submission(sid,
                                  bool(args.get("approve", True)),
                                  int(args.get("exempt", 0) or 0))
     if name == "query_secret_kb":
