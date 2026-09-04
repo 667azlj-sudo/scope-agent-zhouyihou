@@ -79,6 +79,11 @@
           <span class="q-text">任务条件库</span>
           <span class="q-desc">维护各类任务需要的条件</span>
         </button>
+        <button class="quick-card" @click="$emit('goto', 'secretkb')">
+          <span class="q-icon">🔒</span>
+          <span class="q-text">机密知识库</span>
+          <span class="q-desc">上传机密资料、审批 Agent 访问</span>
+        </button>
         <button class="quick-card" @click="$emit('goto', 'agentmanage')">
           <span class="q-icon">🤖</span>
           <span class="q-text">Agent 管理</span>

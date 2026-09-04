@@ -675,8 +675,14 @@ def classify(tid: int, body: ClassifyTaskIn, user: dict = Depends(require_role("
 
 @app.post("/api/tasks/distribute")
 def distribute_task(body: AssignTaskIn, user: dict = Depends(require_role("manager"))):
-    """经理 agent 把内部任务分发给某个员工 agent（distributed）"""
+    """经理 agent 把内部任务分发给某个员工 agent（distributed，仅本公司员工）"""
     _require_company_task(body.task_id, user)
+    target_agent = af.get_agent(body.agent_id)
+    if not target_agent:
+        raise HTTPException(status_code=404, detail="目标 Agent 不存在")
+    target_owner = auth.get_user_by_id(target_agent.get("user_id"))
+    if not target_owner or target_owner.get("company_id") != user.get("company_id"):
+        raise HTTPException(status_code=403, detail="只能分发给本公司员工")
     return af.distribute_task(body.agent_id, body.task_id)
 
 
@@ -735,8 +741,12 @@ def unmatched_tasks(user: dict = Depends(require_role("manager"))):
 
 @app.post("/api/tasks/{tid}/publish-hall")
 def publish_hall(tid: int, body: PublishHallIn, user: dict = Depends(require_role("manager"))):
-    """经理选候选人后发布到任务大厅"""
+    """经理选候选人后发布到任务大厅（候选人仅限本公司）"""
     _require_company_task(tid, user)
+    for uid in body.candidate_ids:
+        cand = auth.get_user_by_id(uid)
+        if not cand or cand.get("company_id") != user.get("company_id"):
+            raise HTTPException(status_code=403, detail="候选人只能选择本公司成员")
     return af.publish_to_hall(tid, body.candidate_ids)
 
 
@@ -1012,6 +1022,68 @@ def delete_task_condition(cid: int, user: dict = Depends(require_role("manager")
     if not any(c["id"] == cid for c in conds):
         raise HTTPException(status_code=403, detail="无权删除其他公司条件")
     return af.delete_task_condition(cid)
+
+
+# ---- 知识库③：公司本地机密知识库（仅经理 Agent 可访问） ----
+class SecretKbIn(BaseModel):
+    content: str
+
+
+@app.get("/api/secret-kb")
+def list_secret_kb(user: dict = Depends(require_role("manager"))):
+    """列出本公司机密知识库（仅经理）"""
+    return {"entries": af.get_secret_kb(user.get("company_id"))}
+
+
+@app.post("/api/secret-kb")
+def add_secret_kb(body: SecretKbIn, user: dict = Depends(require_role("manager"))):
+    """写入本公司机密知识库（仅经理）"""
+    return af.add_secret_kb(user.get("company_id"), body.content)
+
+
+@app.delete("/api/secret-kb/{sid}")
+def delete_secret_kb(sid: int, user: dict = Depends(require_role("manager"))):
+    """删除本公司机密知识库条目（仅经理）"""
+    return af.delete_secret_kb(sid, user.get("company_id"))
+
+
+@app.post("/api/secret-kb/upload")
+async def upload_secret_kb(files: list[UploadFile] = File(...), user: dict = Depends(require_role("manager"))):
+    """经理上传本地文档，解析文本后写入本公司机密知识库（仅经理）"""
+    texts = []
+    for f in files:
+        try:
+            data = await _read_upload_bytes(f)
+        except ValueError:
+            return {"ok": False, "msg": f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024*1024)}MB）"}
+        text = _read_text_bytes(data).strip()
+        if text:
+            texts.append(text[:5000])
+    if not texts:
+        return {"ok": False, "msg": "没有可解析的文本内容"}
+    added = 0
+    for t in texts:
+        r = af.add_secret_kb(user.get("company_id"), t)
+        if r.get("ok"):
+            added += 1
+    return {"ok": True, "count": added, "msg": f"已导入 {added} 条机密知识"}
+
+
+class SecretKbReviewIn(BaseModel):
+    approve: bool
+    grant_mode: str = "once"   # once=仅本次 / window=限时自由访问
+
+
+@app.get("/api/secret-kb/requests")
+def list_secret_kb_requests(status: str = "", user: dict = Depends(require_role("manager"))):
+    """列出本公司机密库访问申请（仅经理，可按 status 过滤）"""
+    return {"requests": af.get_secret_kb_requests(user.get("company_id"), status or None)}
+
+
+@app.post("/api/secret-kb/requests/{rid}/review")
+def review_secret_kb_request(rid: int, body: SecretKbReviewIn, user: dict = Depends(require_role("manager"))):
+    """经理审批机密库访问申请（仅经理；grant_mode 决定批准粒度）"""
+    return af.review_secret_kb_request(rid, user.get("company_id"), body.approve, body.grant_mode)
 
 
 # ---- 通知 ----

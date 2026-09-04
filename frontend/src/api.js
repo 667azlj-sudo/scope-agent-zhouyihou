@@ -103,6 +103,17 @@ export const getTaskConditions = (companyId) => api(`/api/conditions/${companyId
 export const addTaskCondition = (companyId, keywords, conditions) => api("/api/conditions", "POST", { company_id: companyId, keywords, conditions })
 export const deleteTaskCondition = (cid) => api(`/api/conditions/${cid}`, "DELETE", {})
 
+// 知识库③ 公司机密知识库（仅经理）
+export const getSecretKb = () => api("/api/secret-kb")
+export const deleteSecretKb = (sid) => api(`/api/secret-kb/${sid}`, "DELETE", {})
+export const getSecretKbRequests = (status = "") => api(`/api/secret-kb/requests${status ? "?status=" + status : ""}`)
+export const reviewSecretKbRequest = (rid, approve, grantMode = "once") => api(`/api/secret-kb/requests/${rid}/review`, "POST", { approve, grant_mode: grantMode })
+export function uploadSecretKb(files) {
+  const fd = new FormData()
+  for (const f of files) fd.append("files", f)
+  return fetch(`/api/secret-kb/upload`, { method: "POST", headers: authHeaders(), body: fd }).then(r => r.json())
+}
+
 // 通知
 export const getNotifications = (uid) => api(`/api/notifications/${uid}`)
 export const readNotifications = (uid) => api(`/api/notifications/${uid}/read`, "POST", {})

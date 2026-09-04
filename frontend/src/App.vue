@@ -20,6 +20,7 @@
       <AgentManage v-else-if="tab === 'agentmanage'" :user="user" />
       <Billing v-else-if="tab === 'billing'" :user="user" />
       <Conditions v-else-if="tab === 'conditions'" :user="user" />
+      <SecretKb v-else-if="tab === 'secretkb'" :user="user" />
 
       <!-- 员工 / 普通成员 -->
       <MyTasks v-else-if="tab === 'mytask'" :user="user" />
@@ -68,6 +69,7 @@ import MySpace from "./MySpace.vue"
 import MyTasks from "./MyTasks.vue"
 import Billing from "./Billing.vue"
 import Conditions from "./Conditions.vue"
+import SecretKb from "./SecretKb.vue"
 import OutsourceHall from "./OutsourceHall.vue"
 import { getUserChats } from "./api.js"
 

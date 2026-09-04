@@ -15,16 +15,21 @@ agent_framework.py —— 多 Agent 协作框架核心
 import json
 import os
 import re
+import time
 
 from dbcore import get_conn, insert_id, ensure_column, IntegrityErrors
 
 ROLE_TYPES = ("employee", "functional", "manager")
 
-# Agent 可用工具（manager 额外多一个 review）
+# Agent 可用工具（manager 额外多 review 与 query_secret_kb）
 BASE_TOOLS = ["query_db", "message_agent", "get_task", "submit_work"]
+MANAGER_TOOLS = ["review", "query_secret_kb"]
 
 # 外包任务押金（元）。缴纳后即可接取；任务通过审核后原路退回。
 OUTSOURCE_DEPOSIT = float(os.environ.get("OUTSOURCE_DEPOSIT", "100") or "100")
+
+# 机密库「限时自由访问」粒度的默认时长（秒）。
+SECRET_KB_GRANT_SECONDS = int(os.environ.get("SECRET_KB_GRANT_SECONDS", "3600") or "3600")
 
 
 def init_agent_db():
@@ -121,6 +126,28 @@ def init_agent_db():
         created_at TEXT DEFAULT (__NOW__)
     );
 
+    CREATE TABLE IF NOT EXISTS secret_kb (
+        id __PK__,
+        company_id INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT DEFAULT (__NOW__)
+    );
+
+    CREATE TABLE IF NOT EXISTS secret_kb_requests (
+        id __PK__,
+        company_id INTEGER NOT NULL,
+        agent_id INTEGER NOT NULL,
+        query TEXT NOT NULL,
+        why TEXT DEFAULT '',
+        usage TEXT DEFAULT '',
+        danger TEXT DEFAULT '',
+        status TEXT DEFAULT 'pending',
+        grant_mode TEXT DEFAULT 'once',
+        grant_expires_at INTEGER,
+        created_at TEXT DEFAULT (__NOW__),
+        reviewed_at TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS deposits (
         id __PK__,
         task_id INTEGER NOT NULL,
@@ -145,6 +172,9 @@ def init_agent_db():
     ensure_column(conn, "submissions", "stage", "TEXT DEFAULT 'submitted'")
     ensure_column(conn, "submissions", "tech_reviewer", "INTEGER")
     ensure_column(conn, "agent_tasks", "deposit", f"REAL DEFAULT {OUTSOURCE_DEPOSIT}")
+    # 迁移：secret_kb_requests 增加审批粒度（once=仅本次 / window=限时自由访问）
+    ensure_column(conn, "secret_kb_requests", "grant_mode", "TEXT DEFAULT 'once'")
+    ensure_column(conn, "secret_kb_requests", "grant_expires_at", "INTEGER")
     conn.commit()
     conn.close()
     # 迁移：旧表没有 classification 列的话，ALTER TABLE 补上
@@ -248,14 +278,14 @@ def agent_tools(agent_id):
     """返回该 agent 的工具列表。
 
     所有 agent 都有：query_db / message_agent / get_task / submit_work；
-    只有 manager 多一个 review。
+    只有 manager 多 review / query_secret_kb（机密知识库仅经理可访问）。
     """
     agent = get_agent(agent_id)
     if not agent:
         return []
     tools = list(BASE_TOOLS)
     if agent["role_type"] == "manager":
-        tools.append("review")
+        tools.extend(MANAGER_TOOLS)
     return tools
 
 
@@ -348,6 +378,10 @@ def split_task(title, detail, manager_agent_id=None):
         conn.close()
 
 
+# 外包门槛：只有"极其简单"（难度低于该值）且"不涉密"的任务才允许外包。
+OUTSOURCE_MAX_DIFFICULTY = 0.34
+
+
 def _outsource_suggestion(classification, difficulty):
     """外包要求：不涉密 + 极简单。返回 (建议, 理由)。"""
     try:
@@ -356,9 +390,22 @@ def _outsource_suggestion(classification, difficulty):
         d = 0.5
     if classification == "机密":
         return "内部", "涉及公司机密，建议内部处理"
-    if d < 0.34:
+    if d < OUTSOURCE_MAX_DIFFICULTY:
         return "外包", "不涉密且简单，可外包"
     return "内部", "不涉密但不算简单，建议内部处理"
+
+
+def can_outsource(classification, difficulty):
+    """外包资格校验：必须不涉密且极其简单。返回 (ok, msg)。"""
+    if classification == "机密":
+        return False, "机密任务不可外包，只能内部分配"
+    try:
+        d = float(difficulty)
+    except (TypeError, ValueError):
+        d = 0.5
+    if d >= OUTSOURCE_MAX_DIFFICULTY:
+        return False, "任务不够简单，不可外包"
+    return True, ""
 
 
 def get_pending_classification(company_id=None):
@@ -400,6 +447,13 @@ def manager_choose(task_id, choice):
     if task["status"] != "pending_classify":
         conn.close()
         return {"ok": False, "msg": "任务不是待确认分级状态，不能选择"}
+    task = dict(task)
+    # 外包硬约束：不涉密 + 极其简单，否则拒绝
+    if choice == "outsource":
+        ok_out, msg_out = can_outsource(task.get("classification"), task.get("difficulty"))
+        if not ok_out:
+            conn.close()
+            return {"ok": False, "msg": msg_out}
     new_status = "internal" if choice == "internal" else "outsource"
     conn.execute("UPDATE agent_tasks SET status=? WHERE id=?", (new_status, task_id))
     conn.commit()
@@ -469,6 +523,14 @@ def _task_manager_user_id(task):
         row = conn.execute("SELECT user_id FROM agents WHERE id=?", (mid,)).fetchone()
     conn.close()
     return dict(row)["user_id"] if row and row["user_id"] else None
+
+
+def _agent_company_id(agent):
+    """通过 agent 的 user_id 找到所属公司 id。"""
+    conn = get_conn()
+    row = conn.execute("SELECT company_id FROM users WHERE id=?", (agent["user_id"],)).fetchone()
+    conn.close()
+    return dict(row)["company_id"] if row and row["company_id"] else None
 
 
 def record_pricing_decision(manager_user_id, task_title, difficulty, original, final):
@@ -933,6 +995,166 @@ def query_task_conditions(task_title, task_detail, company_id):
 
 
 # ---------------------------------------------------------------------------
+# 知识库③：公司本地机密知识库（仅经理 Agent 可访问，且访问需经理逐次审批）
+# ---------------------------------------------------------------------------
+def add_secret_kb(company_id, content):
+    """经理向本公司机密知识库写入一条。company_id 必须非空。"""
+    content = (content or "").strip()
+    if not content:
+        return {"ok": False, "msg": "机密知识内容为空"}
+    if not company_id:
+        return {"ok": False, "msg": "缺少公司归属"}
+    conn = get_conn()
+    sid = insert_id(conn, "INSERT INTO secret_kb (company_id, content) VALUES (?,?)",
+                    (company_id, content))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": sid}
+
+
+def get_secret_kb(company_id):
+    """列出本公司机密知识库全部条目。"""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT id, content, created_at FROM secret_kb WHERE company_id=? ORDER BY id DESC",
+        (company_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_secret_kb(entry_id, company_id):
+    """删除本公司机密知识库条目（仅本公司）。"""
+    conn = get_conn()
+    cur = conn.execute("DELETE FROM secret_kb WHERE id=? AND company_id=?",
+                       (entry_id, company_id))
+    conn.commit()
+    deleted = cur.rowcount
+    conn.close()
+    return {"ok": True, "deleted": deleted}
+
+
+def search_secret_kb(company_id, query, top_k=5):
+    """经理 Agent 检索本公司机密知识库（关键词匹配，返回片段列表）。
+
+    注意：业务上不应直接调用此函数，应走 access_secret_kb()，先经经理审批。
+    """
+    entries = get_secret_kb(company_id)
+    if not query or not query.strip():
+        return entries[:top_k]
+    try:
+        import jieba
+        kws = [w for w in jieba.lcut(query) if len(w.strip()) >= 2]
+    except Exception:  # noqa: BLE001
+        kws = query.split()
+    if not kws:
+        return entries[:top_k]
+    scored = []
+    for e in entries:
+        c = e["content"]
+        score = sum(1 for k in kws if k in c)
+        if score > 0:
+            scored.append((score, e))
+    scored.sort(key=lambda x: (-x[0], -x[1]["id"]))
+    return [e for _, e in scored[:top_k]]
+
+
+# ---- 机密库访问审批：agent 必须先发起申请，经理批准后才能读 ----
+def request_secret_kb_access(agent_id, company_id, query, why, usage, danger):
+    """经理 Agent 发起机密库访问申请。返回申请记录（status=pending）。"""
+    query = (query or "").strip()
+    if not query:
+        return {"ok": False, "msg": "检索内容为空"}
+    if not company_id:
+        return {"ok": False, "msg": "缺少公司归属"}
+    conn = get_conn()
+    rid = insert_id(
+        conn,
+        "INSERT INTO secret_kb_requests (company_id, agent_id, query, why, usage, danger) "
+        "VALUES (?,?,?,?,?,?)",
+        (company_id, agent_id, query,
+         (why or "").strip(), (usage or "").strip(), (danger or "").strip()),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True, "id": rid, "status": "pending",
+            "msg": "已提交机密库访问申请，等待经理审批"}
+
+
+def get_secret_kb_requests(company_id, status=None):
+    """列出本公司机密库访问申请（经理审批用）。可按 status 过滤。"""
+    conn = get_conn()
+    sql = ("SELECT r.*, a.name AS agent_name FROM secret_kb_requests r "
+           "LEFT JOIN agents a ON a.id = r.agent_id WHERE r.company_id=?")
+    params = [company_id]
+    if status:
+        sql += " AND r.status=?"
+        params.append(status)
+    rows = conn.execute(sql + " ORDER BY r.id DESC", tuple(params)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def review_secret_kb_request(request_id, company_id, approve, grant_mode="once", grant_seconds=None):
+    """经理审批机密库访问申请。
+
+    approve=True 放行，False 拒绝。
+    grant_mode（批准粒度，由经理自选）：
+      - 'once'   ：仅放行本次 query（默认，最严格）
+      - 'window' ：限时自由访问，grant_seconds 内该 agent 可任意检索（默认 SECRET_KB_GRANT_SECONDS）
+    """
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT * FROM secret_kb_requests WHERE id=? AND company_id=?", (request_id, company_id)).fetchone()
+    if not row:
+        conn.close()
+        return {"ok": False, "msg": "申请不存在"}
+    if row["status"] != "pending":
+        conn.close()
+        return {"ok": False, "msg": "该申请已处理"}
+    new_status = "approved" if approve else "rejected"
+    if approve and grant_mode not in ("once", "window"):
+        grant_mode = "once"
+    expires = None
+    if approve and grant_mode == "window":
+        seconds = int(grant_seconds or SECRET_KB_GRANT_SECONDS)
+        expires = int(time.time()) + seconds
+    conn.execute(
+        "UPDATE secret_kb_requests SET status=?, grant_mode=?, grant_expires_at=?, reviewed_at=__NOW__ WHERE id=?",
+        (new_status, grant_mode if approve else row["grant_mode"], expires, request_id))
+    conn.commit()
+    conn.close()
+    return {"ok": True, "status": new_status, "grant_mode": grant_mode if approve else None,
+            "msg": f"已批准该访问（{'仅本次' if grant_mode == 'once' else '限时自由访问'}）" if approve else "已拒绝该访问"}
+
+
+def access_secret_kb(agent_id, company_id, query, why, usage, danger):
+    """经理 Agent 访问机密库的唯一入口。
+
+    放行规则（任一命中即可）：
+      1. 存在同 agent + 同 query 的 approved 申请（once 粒度）
+      2. 存在同 agent 的 approved 申请且 grant_mode='window' 且未过期
+    否则提交带「为什么需要 / 项目用途 / 潜在危险」的新申请，等待经理审批；
+    未批准前不返回任何机密内容。
+    """
+    query = (query or "").strip()
+    conn = get_conn()
+    now = int(time.time())
+    approved = conn.execute(
+        "SELECT id, grant_mode, grant_expires_at FROM secret_kb_requests "
+        "WHERE company_id=? AND agent_id=? AND status='approved' AND ("
+        "  (query=? AND grant_mode='once') OR "
+        "  (grant_mode='window' AND (grant_expires_at IS NULL OR grant_expires_at > ?))"
+        ") ORDER BY id DESC LIMIT 1",
+        (company_id, agent_id, query, now)).fetchone()
+    conn.close()
+    if approved:
+        return {"ok": True, "status": "approved", "grant_mode": approved["grant_mode"],
+                "hits": search_secret_kb(company_id, query)}
+    # 无放行申请 → 提交新申请，等待经理审批
+    return request_secret_kb_access(agent_id, company_id, query, why, usage, danger)
+
+
+# ---------------------------------------------------------------------------
 # 通知（总 Agent 向经理发信息）
 # ---------------------------------------------------------------------------
 def create_notification(user_id, content, task_id=None):
@@ -969,7 +1191,16 @@ def _estimate_with_llm(task, context, base_salary):
     """让 LLM 结合任务 + 员工记录，给出工时/报价/适配度。返回 dict。
 
     context = 员工本地记录 + 工作记录拼接。
+
+    报价护栏：LLM 报价若偏离算法区间（0.5~3 倍基础工资，或工时异常），
+    视为"不好报价"，回退到难度系数公式，避免 LLM 拍出离谱价格。
     """
+    difficulty = float(task.get("difficulty") or 0.5)
+    formula_hours = round(2 + difficulty * 16, 1)
+    formula_wage = price_task(base_salary, difficulty)
+    wage_floor = round(float(base_salary) * 0.5, 2)
+    wage_ceil = round(float(base_salary) * 3.0, 2)
+
     try:
         from llm import chat as llm_chat
         system = (
@@ -988,25 +1219,33 @@ def _estimate_with_llm(task, context, base_salary):
         if isinstance(data, dict):
             hours = float(data.get("hours", 0) or 0)
             wage = float(data.get("wage", 0) or 0)
-            if hours > 0 and wage > 0:
+            # 报价护栏：超出合理区间或工时异常 → 视为不好报价，回退公式
+            if hours > 0 and wage > 0 and wage_floor <= wage <= wage_ceil and 0.5 <= hours <= 160:
                 return {
                     "hours": hours, "wage": wage,
                     "reason": str(data.get("reason", "")),
                     "suitability": str(data.get("suitability", "适合") or "适合"),
                     "suitability_reason": str(data.get("suitability_reason", "")),
                 }
+            return {
+                "hours": formula_hours, "wage": formula_wage,
+                "reason": "LLM 报价超出合理区间，按算法公式估算",
+                "suitability": str(data.get("suitability", "适合") or "适合"),
+                "suitability_reason": str(data.get("suitability_reason", "")),
+            }
     except Exception as e:  # noqa: BLE001
         print(f"[estimate] LLM 报价失败，走兜底公式：{e}")
-    difficulty = float(task.get("difficulty") or 0.5)
-    hours = round(2 + difficulty * 16, 1)
-    wage = price_task(base_salary, difficulty)
-    return {"hours": hours, "wage": wage, "reason": "按基础工资与难度系数估算",
+    return {"hours": formula_hours, "wage": formula_wage,
+            "reason": "按基础工资与难度系数估算",
             "suitability": "适合", "suitability_reason": "按难度系数估算"}
 
 
 def estimate_task(agent_id, task_id):
     """员工 agent 审核任务并报价：结合本地记录+工作记录给出适配度、工时、工资，
-    并向总 Agent 查询任务条件（缺失则通知经理）。状态 -> estimated。"""
+    并向总 Agent 查询任务条件（缺失则通知经理）。状态 -> estimated。
+
+    权责约束：只有被分派给该 agent 的任务、且处于待报价状态时才能报价。
+    """
     conn = get_conn()
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
     agent = conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
@@ -1015,6 +1254,11 @@ def estimate_task(agent_id, task_id):
         return {"ok": False, "msg": "任务或 Agent 不存在"}
     task = dict(task)
     agent = dict(agent)
+    # 权责：只能报价分派给自己的任务，且任务须处于待报价状态
+    if task.get("assignee_agent") != agent_id:
+        return {"ok": False, "msg": "任务未分派给你，无法报价"}
+    if task["status"] != "distributed":
+        return {"ok": False, "msg": "任务当前状态不允许报价"}
 
     # 知识库①：本地记录 + 工作记录 + 能力知识库(RAG) → 适配度 & 报价
     profile = get_user_records(agent["user_id"])["content"]
@@ -1141,12 +1385,22 @@ def get_task(agent_id):
 
 
 def submit_work(task_id, agent_id, content, images=None):
-    """员工提交成果：写入 submissions（可附照片凭证），任务状态 -> submitted。"""
+    """员工提交成果：写入 submissions（可附照片凭证），任务状态 -> submitted。
+
+    权责约束：只有被分派给该 agent 的任务、且处于进行中/已打回状态时才能提交。
+    """
     conn = get_conn()
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
     if not task:
         conn.close()
         return {"ok": False, "msg": "任务不存在"}
+    task = dict(task)
+    if task.get("assignee_agent") != agent_id:
+        conn.close()
+        return {"ok": False, "msg": "任务未分派给你，无法提交成果"}
+    if task["status"] not in ("assigned", "rejected"):
+        conn.close()
+        return {"ok": False, "msg": "任务当前状态不允许提交成果"}
     imgs = json.dumps(list(images or []), ensure_ascii=False)
     sid = insert_id(
         conn,
@@ -1200,6 +1454,10 @@ def review_submission(submission_id, approve, exempt=0, custom_price=None):
         conn.close()
         return {"ok": False, "msg": "提交不存在"}
     sub = dict(sub)
+    # 仅待审核的提交可被审核；已通过/已打回/已走四阶段流水线的提交不可重复审核
+    if sub["status"] != "pending":
+        conn.close()
+        return {"ok": False, "msg": "该提交已处理，不能重复审核"}
 
     task = conn.execute("SELECT * FROM agent_tasks WHERE id=?", (sub["task_id"],)).fetchone()
     if not task:
@@ -1250,8 +1508,9 @@ def review_submission(submission_id, approve, exempt=0, custom_price=None):
     else:
         price = 0
         conn.execute("UPDATE submissions SET status='rejected' WHERE id=?", (submission_id,))
-        conn.execute("UPDATE agent_tasks SET status='pending' WHERE id=?", (task["id"],))
-        msg = "⏪ 已打回，任务回到 pending 重新处理"
+        # 打回后回到 assigned，让员工可重新提交（与四阶段流水线保持一致，避免责任链断裂）
+        conn.execute("UPDATE agent_tasks SET status='assigned' WHERE id=?", (task["id"],))
+        msg = "⏪ 已打回，任务回到进行中，可重新提交"
 
     conn.commit()
     conn.close()
@@ -1385,6 +1644,13 @@ def _get_sub_and_task(conn, submission_id):
     return dict(sub), dict(task) if task else None
 
 
+def _reject_if_processed(sub):
+    """四阶段流水线只允许处理 status=pending 的提交，避免与两阶段审核重复结算。"""
+    if sub.get("status") != "pending":
+        return {"ok": False, "msg": "该提交已处理，不能重复审核"}
+    return None
+
+
 def agent_check_submission(submission_id):
     """阶段①：员工 agent 自检，不合格直接打回。"""
     conn = get_conn()
@@ -1392,6 +1658,10 @@ def agent_check_submission(submission_id):
     if not sub or not task:
         conn.close()
         return {"ok": False, "msg": "提交或任务不存在"}
+    processed = _reject_if_processed(sub)
+    if processed:
+        conn.close()
+        return processed
     if sub["stage"] != "submitted":
         conn.close()
         return {"ok": False, "msg": "当前不是待员工 agent 检查阶段"}
@@ -1416,6 +1686,10 @@ def manager_test_submission(submission_id):
     if not sub or not task:
         conn.close()
         return {"ok": False, "msg": "提交或任务不存在"}
+    processed = _reject_if_processed(sub)
+    if processed:
+        conn.close()
+        return processed
     if sub["stage"] != "agent_checked":
         conn.close()
         return {"ok": False, "msg": "当前不是待经理 agent 跑测试阶段"}
@@ -1440,6 +1714,10 @@ def manager_verify_submission(submission_id, approve, custom_price=None):
     if not sub or not task:
         conn.close()
         return {"ok": False, "msg": "提交或任务不存在"}
+    processed = _reject_if_processed(sub)
+    if processed:
+        conn.close()
+        return processed
     if sub["stage"] != "manager_tested":
         conn.close()
         return {"ok": False, "msg": "当前不是待经理核验阶段"}
@@ -1477,6 +1755,10 @@ def tech_verify_submission(submission_id, user_id, approve):
     if not sub or not task:
         conn.close()
         return {"ok": False, "msg": "提交或任务不存在"}
+    processed = _reject_if_processed(sub)
+    if processed:
+        conn.close()
+        return processed
     if sub["stage"] != "manager_verified":
         conn.close()
         return {"ok": False, "msg": "当前不是待技术人员验证阶段"}
@@ -1737,6 +2019,20 @@ def _build_tool_schemas(tools):
                 "exempt": {"type": "integer", "description": "1=豁免绩效(按基础工资)"}},
                 "required": ["submission_id", "approve"]},
         },
+        "query_secret_kb": {
+            "name": "query_secret_kb",
+            "description": (
+                "检索本公司机密知识库（仅经理 Agent 可用）。访问受人工审批控制："
+                "调用时必须说明 why(为什么需要)、usage(在项目里的用途)、danger(潜在危险)，"
+                "提交后需经理批准，批准前不会返回任何机密内容。"
+            ),
+            "parameters": {"type": "object", "properties": {
+                "query": {"type": "string", "description": "检索关键词"},
+                "why": {"type": "string", "description": "为什么需要访问该机密内容"},
+                "usage": {"type": "string", "description": "该机密内容在项目里的用途"},
+                "danger": {"type": "string", "description": "使用该机密内容可能带来的潜在危险"}},
+                "required": ["query", "why", "usage", "danger"]},
+        },
     }
     return [{"type": "function", "function": schemas[t]} for t in tools if t in schemas]
 
@@ -1771,6 +2067,14 @@ def _execute_tool(name, args, agent, tools):
         return review_submission(args.get("submission_id"),
                                  bool(args.get("approve", True)),
                                  int(args.get("exempt", 0) or 0))
+    if name == "query_secret_kb":
+        # 机密知识库：仅经理 agent 可访问，且须经经理逐次审批
+        if agent.get("role_type") != "manager":
+            return {"error": "机密知识库仅经理 Agent 可访问"}
+        company_id = _agent_company_id(agent)
+        return access_secret_kb(
+            agent["id"], company_id, args.get("query", ""),
+            args.get("why", ""), args.get("usage", ""), args.get("danger", ""))
     return {"error": "未知工具"}
 
 
